@@ -2,6 +2,7 @@ package builder
 
 import (
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"slices"
 
@@ -75,6 +76,43 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 		if !manualGCSupported(config) {
 			return nil, fmt.Errorf("-gc=manual is currently supported only on darwin, hosted linux, windows, and wasm targets")
 		}
+	}
+	if config.BuildMode() == "c-shared" {
+		if config.GOOS() != "linux" {
+			return nil, fmt.Errorf("native buildmode c-shared is currently supported only on linux")
+		}
+		if config.GC() != "manual" {
+			return nil, fmt.Errorf("native buildmode c-shared currently requires -gc=manual")
+		}
+		if config.Scheduler() != "none" {
+			return nil, fmt.Errorf("native buildmode c-shared currently requires -scheduler=none")
+		}
+		// The Linux target normally includes its thread scheduler and signal
+		// support as C objects. They are not used with scheduler=none and leave
+		// process-wide hooks in a shared library. The futex implementation stays
+		// linked because the allocator mutex uses it even without goroutines.
+		config.Target.ExtraFiles = slices.DeleteFunc(config.Target.ExtraFiles, func(path string) bool {
+			switch path {
+			case "src/internal/task/task_threads.c", "src/runtime/runtime_unix.c", "src/runtime/signal.c":
+				return true
+			default:
+				return false
+			}
+		})
+		config.Target.ExtraFiles = append(config.Target.ExtraFiles, "src/runtime/cshared/runtime_cshared_linux.c")
+	}
+	for _, path := range options.ExtraFiles {
+		if path == "" {
+			return nil, fmt.Errorf("--extra-file cannot be empty")
+		}
+		if !filepath.IsAbs(path) && options.Directory != "" {
+			path = filepath.Join(options.Directory, path)
+		}
+		path, err = filepath.Abs(path)
+		if err != nil {
+			return nil, fmt.Errorf("could not resolve --extra-file %q: %w", path, err)
+		}
+		config.Target.ExtraFiles = append(config.Target.ExtraFiles, path)
 	}
 
 	return config, nil

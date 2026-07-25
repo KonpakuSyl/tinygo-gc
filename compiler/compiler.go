@@ -1183,15 +1183,15 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 	if b.info.section != "" {
 		b.llvmFn.SetSection(b.info.section)
 	}
-	if b.info.exported && strings.HasPrefix(b.Triple, "wasm") {
-		// Set the exported name. This is necessary for WebAssembly because
-		// otherwise the function is not exported.
-		functionAttr := b.ctx.CreateStringAttribute("wasm-export-name", b.info.linkName)
-		b.llvmFn.AddFunctionAttr(functionAttr)
-		// Unlike most targets, exported functions are actually visible in
-		// WebAssembly (even if it's not called from within the WebAssembly
-		// module). But LTO generally optimizes such functions away. Therefore,
-		// exported functions must be explicitly marked as used.
+	if b.info.exported && (strings.HasPrefix(b.Triple, "wasm") || b.isNativeCSharedExport()) {
+		// WebAssembly needs an explicit export name, while native shared
+		// libraries use the ordinary global symbol name.
+		if strings.HasPrefix(b.Triple, "wasm") {
+			functionAttr := b.ctx.CreateStringAttribute("wasm-export-name", b.info.linkName)
+			b.llvmFn.AddFunctionAttr(functionAttr)
+		}
+		// LTO generally optimizes externally called functions away unless they
+		// are explicitly marked as used.
 		llvmutil.AppendToGlobal(b.mod, "llvm.used", b.llvmFn)
 	}
 
@@ -1350,6 +1350,12 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 // diagnostic.
 func (b *builder) createFunction() {
 	b.createFunctionStart(false)
+	if b.isNativeCSharedExport() && b.fn.Pkg.Pkg.Path() != "runtime" {
+		b.currentBlock = b.fn.Blocks[0]
+		b.currentBlockInfo = &b.blockInfo[0]
+		stackTop := b.CreatePtrToInt(b.readStackPointer(), b.uintptrType, "")
+		b.createRuntimeCall("cSharedInit", []llvm.Value{stackTop}, "")
+	}
 
 	// Fill blocks with instructions.
 	for _, block := range b.fn.DomPreorder() {
@@ -1446,6 +1452,13 @@ func (b *builder) createFunction() {
 	if b.info.wasmExport != "" {
 		b.createWasmExport()
 	}
+}
+
+func (b *builder) isNativeCSharedExport() bool {
+	if b.BuildMode != "c-shared" || strings.HasPrefix(b.Triple, "wasm") || !b.info.exported {
+		return false
+	}
+	return b.fn.Pkg.Pkg.Path() != "runtime" || b.info.linkName == "tinygo_init"
 }
 
 // posser is an interface that's implemented by both ssa.Value and

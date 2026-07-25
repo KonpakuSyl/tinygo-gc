@@ -32,8 +32,9 @@ type Options struct {
 	GC              string
 	PanicStrategy   string
 	Scheduler       string
-	StackSize       uint64 // goroutine stack size (if none could be automatically determined)
-	ManualSize      uint64 // fixed heap size when using -gc=manual
+	StackSize       uint64   // goroutine stack size (if none could be automatically determined)
+	ManualSize      uint64   // fixed heap size when using -gc=manual
+	ExtraFiles      []string // C or assembly files added from the command line
 	Serial          string
 	Work            bool // -work flag to print temporary build directory
 	InterpTimeout   time.Duration

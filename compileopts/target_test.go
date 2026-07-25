@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io/fs"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -139,5 +140,21 @@ func TestManualSize(t *testing.T) {
 	config.Options.ManualSize = 0
 	if got := config.ManualSize(); got != 64 {
 		t.Fatalf("target manual size: got %d, want 64", got)
+	}
+}
+
+func TestCSharedConfiguration(t *testing.T) {
+	config := Config{
+		Options: &Options{BuildMode: "c-shared", Opt: "z"},
+		Target:  &TargetSpec{},
+	}
+	if !slices.Contains(config.BuildTags(), "tinygo.cshared") {
+		t.Fatalf("c-shared build tags: %v", config.BuildTags())
+	}
+	if !slices.Contains(config.CFlags(false), "-fPIC") {
+		t.Fatalf("c-shared C flags: %v", config.CFlags(false))
+	}
+	if got := config.RelocationModel(); got != "pic" {
+		t.Fatalf("c-shared relocation model: got %q, want pic", got)
 	}
 }

@@ -111,6 +111,9 @@ func (c *Config) BuildTags() []string {
 		"math_big_pure_go",                           // to get math/big to work
 		"gc." + c.GC(), "scheduler." + c.Scheduler(), // used inside the runtime package
 		"serial." + c.Serial()}...) // used inside the machine package
+	if c.BuildMode() == "c-shared" {
+		tags = append(tags, "tinygo.cshared")
+	}
 	switch c.Scheduler() {
 	case "threads", "cores":
 	default:
@@ -371,6 +374,9 @@ func (c *Config) CFlags(libclang bool) []string {
 	cflags = append(cflags, "-gdwarf-4")
 	// Use the same optimization level as TinyGo.
 	cflags = append(cflags, "-O"+c.Options.Opt)
+	if c.BuildMode() == "c-shared" {
+		cflags = append(cflags, "-fPIC")
+	}
 	// Set the LLVM target triple.
 	cflags = append(cflags, "--target="+c.Triple())
 	// Set the -mcpu (or similar) flag.
@@ -633,6 +639,9 @@ func (c *Config) CodeModel() string {
 // RelocationModel returns the relocation model in use on this platform. Valid
 // values are "static", "pic", "dynamicnopic".
 func (c *Config) RelocationModel() string {
+	if c.BuildMode() == "c-shared" {
+		return "pic"
+	}
 	if c.Target.RelocationModel != "" {
 		return c.Target.RelocationModel
 	}

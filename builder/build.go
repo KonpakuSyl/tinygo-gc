@@ -198,11 +198,13 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		if err != nil {
 			return BuildResult{}, err
 		}
-		config.Target.LDFlags = append(config.Target.LDFlags,
-			"--sysroot="+glibc.path,
-			"--dynamic-linker", "/lib64/ld-linux-x86-64.so.2",
-			glibc.crt1,
-		)
+		config.Target.LDFlags = append(config.Target.LDFlags, "--sysroot="+glibc.path)
+		if config.BuildMode() != "c-shared" {
+			config.Target.LDFlags = append(config.Target.LDFlags,
+				"--dynamic-linker", "/lib64/ld-linux-x86-64.so.2",
+				glibc.crt1,
+			)
+		}
 		lateLDFlags = glibc.linkFlags
 	case "":
 		// no library specified, so nothing to do
@@ -721,11 +723,12 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	result.Binary = result.Executable // final file
 	ldflags := append(config.LDFlags(), "-o", result.Executable)
 
-	if config.Options.BuildMode == "c-shared" {
-		if !strings.HasPrefix(config.Triple(), "wasm32-") {
-			return result, fmt.Errorf("buildmode c-shared is only supported on wasm at the moment")
+	if config.BuildMode() == "c-shared" {
+		if strings.HasPrefix(config.Triple(), "wasm32-") {
+			ldflags = append(ldflags, "--no-entry")
+		} else {
+			ldflags = append(ldflags, "-shared")
 		}
-		ldflags = append(ldflags, "--no-entry")
 	}
 
 	if config.Options.BuildMode == "wasi-legacy" {
@@ -763,7 +766,10 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	// contain things like the interrupt vector table and low level operations
 	// such as stack switching.
 	for _, path := range config.ExtraFiles() {
-		abspath := filepath.Join(root, path)
+		abspath := path
+		if !filepath.IsAbs(abspath) {
+			abspath = filepath.Join(root, path)
+		}
 		job := &compileJob{
 			description: "compile extra file " + path,
 			run: func(job *compileJob) error {

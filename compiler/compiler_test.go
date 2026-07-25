@@ -128,6 +128,34 @@ func TestCompiler(t *testing.T) {
 	}
 }
 
+func TestNativeCSharedExport(t *testing.T) {
+	options := &compileopts.Options{
+		Target:     "linux-amd64-gnu",
+		BuildMode:  "c-shared",
+		GC:         "manual",
+		ManualSize: 1024,
+		Scheduler:  "none",
+	}
+	mod, errs := testCompilePackage(t, options, "pragma.go")
+	defer mod.Dispose()
+	if errs != nil {
+		for _, err := range errs {
+			t.Error(err)
+		}
+		return
+	}
+	if err := llvm.VerifyModule(mod, llvm.PrintMessageAction); err != nil {
+		t.Fatal(err)
+	}
+	ir := mod.String()
+	if !strings.Contains(ir, "define void @extern_func()") {
+		t.Fatalf("native export missing from IR:\n%s", ir)
+	}
+	if !strings.Contains(ir, "call void @runtime.cSharedInit") {
+		t.Fatalf("native export does not initialize the runtime:\n%s", ir)
+	}
+}
+
 // fuzzyEqualIR returns true if the two LLVM IR strings passed in are roughly
 // equal. That means, only relevant lines are compared (excluding comments
 // etc.).
@@ -229,6 +257,7 @@ func testCompilePackage(t *testing.T, options *compileopts.Options, file string)
 		ABI:                config.ABI(),
 		GOOS:               config.GOOS(),
 		GOARCH:             config.GOARCH(),
+		BuildMode:          config.BuildMode(),
 		CodeModel:          config.CodeModel(),
 		RelocationModel:    config.RelocationModel(),
 		Scheduler:          config.Scheduler(),

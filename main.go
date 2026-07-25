@@ -1754,6 +1754,14 @@ func main() {
 		manualSize = uint64(size)
 		return err
 	})
+	var extraFiles []string
+	flag.Func("extra-file", "C or assembly source file to compile and link (may be repeated)", func(path string) error {
+		if strings.TrimSpace(path) == "" {
+			return errors.New("extra-file cannot be empty")
+		}
+		extraFiles = append(extraFiles, path)
+		return nil
+	})
 	printSize := flag.String("size", "", "print sizes (none, short, full, html)")
 	printStacks := flag.Bool("print-stacks", false, "print stack sizes of goroutines")
 	printAllocsString := flag.String("print-allocs", "", "regular expression of functions for which heap allocations should be printed")
@@ -1869,6 +1877,7 @@ func main() {
 		BuildMode:       *buildMode,
 		StackSize:       stackSize,
 		ManualSize:      manualSize,
+		ExtraFiles:      extraFiles,
 		Opt:             *opt,
 		GC:              *gc,
 		PanicStrategy:   *panicStrategy,
