@@ -138,12 +138,19 @@ func preinit() {
 	// really be allocated in RAM. Memory will only be allocated when it is
 	// first touched.
 	heapMaxSize = 1 * 1024 * 1024 * 1024 // 1GB for the entire heap
+	if manualSize := manualHeapSizeValue(); manualSize != 0 {
+		heapSize = manualSize
+		heapMaxSize = manualSize
+	}
 	const (
 		MEM_COMMIT     = 0x00001000
 		MEM_RESERVE    = 0x00002000
 		PAGE_READWRITE = 0x04
 	)
 	heapStart = uintptr(_VirtualAlloc(nil, heapMaxSize, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE))
+	if heapStart == 0 {
+		runtimePanic("cannot allocate manual heap memory")
+	}
 	heapEnd = heapStart + heapSize
 }
 

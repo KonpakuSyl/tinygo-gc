@@ -3,6 +3,7 @@ package builder
 import (
 	"fmt"
 	"runtime"
+	"slices"
 
 	"github.com/tinygo-org/tinygo/compileopts"
 	"github.com/tinygo-org/tinygo/goenv"
@@ -54,10 +55,47 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 		return nil, fmt.Errorf("cannot compile with Go toolchain version go%d.%d (TinyGo was built using toolchain version %s)", gorootMajor, gorootMinor, runtime.Version())
 	}
 
-	return &compileopts.Config{
+	config := &compileopts.Config{
 		Options:        options,
 		Target:         spec,
 		GoMinorVersion: gorootMinor,
 		TestConfig:     options.TestConfig,
-	}, nil
+	}
+	// defaultTarget adds the Boehm bridge before command-line GC overrides are
+	// applied. Do not compile that bridge for a different collector.
+	if config.GC() != "boehm" {
+		config.Target.ExtraFiles = slices.DeleteFunc(config.Target.ExtraFiles, func(path string) bool {
+			return path == "src/runtime/gc_boehm.c"
+		})
+	}
+	if config.GC() == "manual" {
+		if config.ManualSize() == 0 {
+			return nil, fmt.Errorf("-gc=manual requires --manual-size or a target manual-size")
+		}
+		if !manualGCSupported(config) {
+			return nil, fmt.Errorf("-gc=manual is currently supported only on darwin, hosted linux, windows, and wasm targets")
+		}
+	}
+
+	return config, nil
+}
+
+func manualGCSupported(config *compileopts.Config) bool {
+	if config.GOOS() == "darwin" || config.GOOS() == "windows" || config.GOARCH() == "wasm" {
+		return true
+	}
+	if config.GOOS() != "linux" {
+		return false
+	}
+
+	// Several bare-metal targets use linux as their GOOS to satisfy the Go
+	// standard library. They do not use runtime_unix.go and cannot reserve a
+	// fixed heap with mmap.
+	for _, tag := range config.Target.BuildTags {
+		switch tag {
+		case "baremetal", "nintendoswitch", "wasm_unknown", "wasip1", "wasip2":
+			return false
+		}
+	}
+	return true
 }

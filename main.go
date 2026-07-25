@@ -1732,7 +1732,7 @@ func main() {
 	command := os.Args[1]
 
 	opt := flag.String("opt", "z", "optimization level: 0, 1, 2, s, z")
-	gc := flag.String("gc", "", "garbage collector to use (none, leaking, conservative, custom, precise, boehm)")
+	gc := flag.String("gc", "", "garbage collector to use (none, leaking, conservative, custom, precise, manual, boehm)")
 	panicStrategy := flag.String("panic", "print", "panic strategy (print, trap)")
 	scheduler := flag.String("scheduler", "", "which scheduler to use (none, tasks, cores, threads, asyncify)")
 	serial := flag.String("serial", "", "which serial output to use (none, uart, usb, rtt)")
@@ -1746,6 +1746,12 @@ func main() {
 	flag.Func("stack-size", "goroutine stack size (if unknown at compile time)", func(s string) error {
 		size, err := bytesize.Parse(s)
 		stackSize = uint64(size)
+		return err
+	})
+	var manualSize uint64
+	flag.Func("manual-size", "fixed heap size used with -gc=manual", func(s string) error {
+		size, err := bytesize.Parse(s)
+		manualSize = uint64(size)
 		return err
 	})
 	printSize := flag.String("size", "", "print sizes (none, short, full, html)")
@@ -1862,6 +1868,7 @@ func main() {
 		Target:          *target,
 		BuildMode:       *buildMode,
 		StackSize:       stackSize,
+		ManualSize:      manualSize,
 		Opt:             *opt,
 		GC:              *gc,
 		PanicStrategy:   *panicStrategy,

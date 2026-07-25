@@ -40,8 +40,10 @@ type TargetSpec struct {
 	Linker           string   `json:"linker,omitempty"`
 	RTLib            string   `json:"rtlib,omitempty"` // compiler runtime library (libgcc, compiler-rt)
 	Libc             string   `json:"libc,omitempty"`
+	Sysroot          string   `json:"sysroot,omitempty"`
 	AutoStackSize    *bool    `json:"automatic-stack-size,omitempty"` // Determine stack size automatically at compile time.
 	DefaultStackSize uint64   `json:"default-stack-size,omitempty"`   // Default stack size if the size couldn't be determined at compile time.
+	ManualSize       uint64   `json:"manual-size,omitempty"`          // Fixed heap size for gc.manual.
 	CFlags           []string `json:"cflags,omitempty"`
 	LDFlags          []string `json:"ldflags,omitempty"`
 	LinkerScript     string   `json:"linkerscript,omitempty"`

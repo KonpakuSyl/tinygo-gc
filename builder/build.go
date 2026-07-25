@@ -130,6 +130,9 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		// This is needed for testing.Testing() to work correctly.
 		globalValues["testing"]["testBinary"] = "1"
 	}
+	if config.GC() == "manual" {
+		globalValues["runtime"]["manualHeapSize"] = strconv.FormatUint(config.ManualSize(), 10)
+	}
 
 	// Copy over explicitly set global values, like
 	// -ldflags="-X main.Version="1.0"
@@ -147,6 +150,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	// the libc needs them.
 	root := goenv.Get("TINYGOROOT")
 	var libcDependencies []*compileJob
+	var lateLDFlags []string
 	switch config.Target.Libc {
 	case "darwin-libSystem":
 		libcJob := makeDarwinLibSystemJob(config, tmpdir)
@@ -189,6 +193,17 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		defer unlock()
 		libcDependencies = append(libcDependencies, libcJob)
 		libcDependencies = append(libcDependencies, makeMinGWExtraLibs(tmpdir, config.GOARCH())...)
+	case "glibc":
+		glibc, err := prepareGLibcSysroot(config)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		config.Target.LDFlags = append(config.Target.LDFlags,
+			"--sysroot="+glibc.path,
+			"--dynamic-linker", "/lib64/ld-linux-x86-64.so.2",
+			glibc.crt1,
+		)
+		lateLDFlags = glibc.linkFlags
 	case "":
 		// no library specified, so nothing to do
 	default:
@@ -217,6 +232,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 		Debug:              !config.Options.SkipDWARF, // emit DWARF except when -internal-nodwarf is passed
 		Nobounds:           config.Options.Nobounds,
 		PanicStrategy:      config.PanicStrategy(),
+		ManualGC:           config.GC() == "manual",
 	}
 
 	// Load the target machine, which is the LLVM object that contains all
@@ -828,6 +844,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				}
 				ldflags = append(ldflags, dependency.result)
 			}
+			ldflags = append(ldflags, lateLDFlags...)
 			ldflags = append(ldflags, "-mllvm", "-mcpu="+config.CPU())
 			ldflags = append(ldflags, "-mllvm", "-mattr="+config.Features()) // needed for MIPS softfloat
 			if config.GOOS() == "windows" {

@@ -21,6 +21,15 @@ func TestLoadTarget(t *testing.T) {
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Error("LoadTarget failed for wrong reason:", err)
 	}
+
+	gnuTarget, err := LoadTarget(&Options{Target: "linux-amd64-gnu"})
+	if err != nil {
+		t.Fatal("could not load linux-amd64-gnu target:", err)
+	}
+	if gnuTarget.Libc != "glibc" || gnuTarget.Sysroot != "lib/sysroots/linux-amd64-gnu" {
+		t.Fatalf("unexpected GNU target libc configuration: %#v", gnuTarget)
+	}
+
 }
 
 func TestGetTargetSpecs_InheritableOnlyTargetsExcluded(t *testing.T) {
@@ -62,6 +71,7 @@ func TestOverrideProperties(t *testing.T) {
 		CFlags:           []string{"-base-foo", "-base-bar"},
 		BuildTags:        []string{"bt1", "bt2"},
 		DefaultStackSize: 42,
+		ManualSize:       42,
 		AutoStackSize:    &baseAutoStackSize,
 	}
 	childAutoStackSize := false
@@ -71,6 +81,7 @@ func TestOverrideProperties(t *testing.T) {
 		CFlags:           []string{"-child-foo", "-child-bar"},
 		AutoStackSize:    &childAutoStackSize,
 		DefaultStackSize: 64,
+		ManualSize:       64,
 	}
 
 	base.overrideProperties(child)
@@ -93,6 +104,9 @@ func TestOverrideProperties(t *testing.T) {
 	if base.DefaultStackSize != 64 {
 		t.Errorf("Overriding failed : got %v", base.DefaultStackSize)
 	}
+	if base.ManualSize != 64 {
+		t.Errorf("Overriding failed : got %v", base.ManualSize)
+	}
 
 	baseAutoStackSize = true
 	base = &TargetSpec{
@@ -111,4 +125,19 @@ func TestOverrideProperties(t *testing.T) {
 		t.Errorf("Overriding failed : got %v", base.DefaultStackSize)
 	}
 
+}
+
+func TestManualSize(t *testing.T) {
+	config := Config{
+		Options: &Options{ManualSize: 32},
+		Target:  &TargetSpec{ManualSize: 64},
+	}
+	if got := config.ManualSize(); got != 32 {
+		t.Fatalf("command-line manual size: got %d, want 32", got)
+	}
+
+	config.Options.ManualSize = 0
+	if got := config.ManualSize(); got != 64 {
+		t.Fatalf("target manual size: got %d, want 64", got)
+	}
 }

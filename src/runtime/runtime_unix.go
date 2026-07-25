@@ -301,6 +301,18 @@ var heapMaxSize uintptr
 var heapStart, heapEnd uintptr
 
 func allocateHeap() {
+	if manualSize := manualHeapSizeValue(); manualSize != 0 {
+		heapSize = manualSize
+		heapMaxSize = manualSize
+		addr := mmap(nil, heapMaxSize, flag_PROT_READ|flag_PROT_WRITE, flag_MAP_PRIVATE|flag_MAP_ANONYMOUS, -1, 0)
+		if addr == unsafe.Pointer(^uintptr(0)) {
+			runtimePanic("cannot allocate manual heap memory")
+		}
+		heapStart = uintptr(addr)
+		heapEnd = heapStart + heapSize
+		return
+	}
+
 	// Allocate a large chunk of virtual memory. Because it is virtual, it won't
 	// really be allocated in RAM. Memory will only be allocated when it is
 	// first touched.

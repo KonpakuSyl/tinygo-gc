@@ -1,4 +1,4 @@
-//go:build gc.conservative || gc.precise
+//go:build gc.conservative || gc.precise || gc.manual
 
 package runtime
 
@@ -311,6 +311,7 @@ func isOnHeap(ptr uintptr) bool {
 // any packages the runtime depends upon may not allocate memory during package
 // initialization.
 func initHeap() {
+	configureManualHeap()
 	calculateHeapAddresses()
 
 	// Set all block states to 'free'.
@@ -417,43 +418,38 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 	gcTotalAlloc += uint64(rawSize)
 	gcMallocs++
 
-	// Acquire a range of free blocks.
-	var ranGC bool
-	var grewHeap bool
-	var pointer unsafe.Pointer
-	for {
-		pointer = popFreeRange(neededBlocks)
-		if pointer != nil {
-			break
-		}
-
-		if !ranGC {
-			// Run the collector and try again.
-			freeBytes := runGC()
-			ranGC = true
-			heapSize := uintptr(metadataStart) - heapStart
-			if freeBytes < heapSize/3 {
-				// Ensure there is at least 33% headroom.
-				// This percentage was arbitrarily chosen, and may need to
-				// be tuned in the future.
-				growHeap()
+	// Acquire a range of free blocks. The manual collector has a fixed-size
+	// heap and never initiates collection or growth from an allocation path.
+	pointer := popFreeRange(neededBlocks)
+	if pointer == nil && manualHeapMode {
+		gcTotalAlloc -= uint64(rawSize)
+		gcMallocs--
+		gcLock.Unlock()
+		panic(ErrManualHeapFull)
+	}
+	if pointer == nil {
+		var ranGC bool
+		var grewHeap bool
+		for pointer == nil {
+			if !ranGC {
+				freeBytes := runGC()
+				ranGC = true
+				heapSize := uintptr(metadataStart) - heapStart
+				if freeBytes < heapSize/3 {
+					growHeap()
+				}
+			} else {
+				if gcDebug && !grewHeap {
+					println("grow heap for request:", uint(neededBlocks))
+					dumpFreeRangeCounts()
+				}
+				if !growHeap() {
+					runtimePanicAt(returnAddress(0), "out of memory")
+				}
+				grewHeap = true
 			}
-			continue
+			pointer = popFreeRange(neededBlocks)
 		}
-
-		if gcDebug && !grewHeap {
-			println("grow heap for request:", uint(neededBlocks))
-			dumpFreeRangeCounts()
-		}
-		if growHeap() {
-			grewHeap = true
-			continue
-		}
-
-		// Unfortunately the heap could not be increased. This
-		// happens on baremetal systems for example (where all
-		// available RAM has already been dedicated to the heap).
-		runtimePanicAt(returnAddress(0), "out of memory")
 	}
 
 	// Set the backing blocks as being allocated.
@@ -554,9 +550,12 @@ func runGC() (freeBytes uintptr) {
 		finishMark()
 	}
 
-	// If we're using threads, resume all other threads before starting the
-	// sweep.
-	gcResumeWorld()
+	// The manual collector keeps mutators stopped through sweep, so it can use
+	// a write-barrier-free object graph. Existing collectors retain their
+	// previous behavior and resume before sweeping.
+	if !manualHeapMode {
+		gcResumeWorld()
+	}
 
 	// Sweep phase: free all non-marked objects and unmark marked objects for
 	// the next collection cycle.
@@ -564,6 +563,10 @@ func runGC() (freeBytes uintptr) {
 
 	// Rebuild the free ranges list.
 	freeBytes = buildFreeRanges()
+
+	if manualHeapMode {
+		gcResumeWorld()
+	}
 
 	// Show how much has been sweeped, for debugging.
 	if gcDebug {

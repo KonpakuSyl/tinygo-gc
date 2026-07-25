@@ -9,7 +9,7 @@ import (
 
 var (
 	validBuildModeOptions     = []string{"default", "c-shared", "wasi-legacy"}
-	validGCOptions            = []string{"none", "leaking", "conservative", "custom", "precise", "boehm"}
+	validGCOptions            = []string{"none", "leaking", "conservative", "custom", "precise", "manual", "boehm"}
 	validSchedulerOptions     = []string{"none", "tasks", "asyncify", "threads", "cores"}
 	validSerialOptions        = []string{"none", "uart", "usb", "rtt"}
 	validPrintSizeOptions     = []string{"none", "short", "full", "html"}
@@ -33,6 +33,7 @@ type Options struct {
 	PanicStrategy   string
 	Scheduler       string
 	StackSize       uint64 // goroutine stack size (if none could be automatically determined)
+	ManualSize      uint64 // fixed heap size when using -gc=manual
 	Serial          string
 	Work            bool // -work flag to print temporary build directory
 	InterpTimeout   time.Duration

@@ -60,6 +60,7 @@ type Config struct {
 	Debug              bool // Whether to emit debug information in the LLVM module.
 	Nobounds           bool // Whether to skip bounds checks
 	PanicStrategy      string
+	ManualGC           bool // Whether allocations may panic with ErrManualHeapFull.
 }
 
 // compilerContext contains function-independent data that should still be
@@ -2176,7 +2177,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			}
 			sizeValue := llvm.ConstInt(b.uintptrType, size, false)
 			layoutValue := b.createObjectLayout(typ, expr.Pos())
-			buf := b.createRuntimeCall("alloc", []llvm.Value{sizeValue, layoutValue}, expr.Comment)
+			buf := b.createRuntimeAlloc([]llvm.Value{sizeValue, layoutValue}, expr.Comment)
 			align := b.targetData.ABITypeAlignment(typ)
 			buf.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(align)))
 			return buf, nil
@@ -2408,7 +2409,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		}
 		sliceSize := b.CreateBinOp(llvm.Mul, elemSizeValue, sliceCapCast, "makeslice.cap")
 		layoutValue := b.createObjectLayout(llvmElemType, expr.Pos())
-		slicePtr := b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
+		slicePtr := b.createRuntimeAlloc([]llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
 		slicePtr.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(elemAlign)))
 
 		// Extend or truncate if necessary. This is safe as we've already done

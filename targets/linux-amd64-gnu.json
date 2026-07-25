@@ -1,0 +1,20 @@
+{
+  "llvm-target": "x86_64-unknown-linux-gnu",
+  "cpu": "x86-64",
+  "features": "+cmov,+cx8,+fxsr,+mmx,+sse,+sse2,+x87",
+  "goos": "linux",
+  "goarch": "amd64",
+  "gc": "precise",
+  "scheduler": "threads",
+  "linker": "ld.lld",
+  "libc": "glibc",
+  "sysroot": "lib/sysroots/linux-amd64-gnu",
+  "ldflags": ["--gc-sections"],
+  "extra-files": [
+    "src/internal/futex/futex_linux.c",
+    "src/internal/task/task_threads.c",
+    "src/runtime/runtime_unix.c",
+    "src/runtime/signal.c",
+    "src/runtime/asm_amd64.S"
+  ]
+}

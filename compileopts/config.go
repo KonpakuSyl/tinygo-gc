@@ -124,7 +124,7 @@ func (c *Config) BuildTags() []string {
 }
 
 // GC returns the garbage collection strategy in use on this platform. Valid
-// values are "none", "leaking", "conservative" and "precise".
+// values are "none", "leaking", "conservative", "precise" and "manual".
 func (c *Config) GC() string {
 	if c.Options.GC != "" {
 		return c.Options.GC
@@ -135,11 +135,31 @@ func (c *Config) GC() string {
 	return "conservative"
 }
 
+// ManualSize returns the fixed heap size for the manual collector.
+// Command-line configuration takes precedence over the target specification.
+func (c *Config) ManualSize() uint64 {
+	if c.Options.ManualSize != 0 {
+		return c.Options.ManualSize
+	}
+	return c.Target.ManualSize
+}
+
+// LibcSysroot returns the absolute path for a target-provided libc sysroot.
+func (c *Config) LibcSysroot() string {
+	if c.Target.Sysroot == "" {
+		return ""
+	}
+	if filepath.IsAbs(c.Target.Sysroot) {
+		return c.Target.Sysroot
+	}
+	return filepath.Join(goenv.Get("TINYGOROOT"), c.Target.Sysroot)
+}
+
 // NeedsStackObjects returns true if the compiler should insert stack objects
 // that can be traced by the garbage collector.
 func (c *Config) NeedsStackObjects() bool {
 	switch c.GC() {
-	case "conservative", "custom", "precise", "boehm":
+	case "conservative", "custom", "precise", "manual", "boehm":
 		for _, tag := range c.BuildTags() {
 			if tag == "tinygo.wasm" {
 				return true
@@ -415,6 +435,20 @@ func (c *Config) LibcCFlags() []string {
 	case "wasmbuiltins":
 		// nothing to add (library is purely for builtins)
 		return nil
+	case "glibc":
+		sysroot := c.LibcSysroot()
+		if sysroot == "" {
+			panic("glibc target is missing sysroot")
+		}
+		includeRoot := filepath.Join(sysroot, "usr", "include")
+		return []string{
+			"-nostdlibinc", "--sysroot=" + sysroot,
+			"-isystem", filepath.Join(includeRoot, "zig"),
+			"-isystem", filepath.Join(includeRoot, "x86-linux-gnu"),
+			"-isystem", filepath.Join(includeRoot, "generic-glibc"),
+			"-isystem", filepath.Join(includeRoot, "x86-linux-any"),
+			"-isystem", filepath.Join(includeRoot, "any-linux-any"),
+		}
 	case "mingw-w64":
 		root := goenv.Get("TINYGOROOT")
 		path := c.LibraryPath("mingw-w64")
