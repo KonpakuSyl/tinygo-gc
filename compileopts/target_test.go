@@ -157,4 +157,15 @@ func TestCSharedConfiguration(t *testing.T) {
 	if got := config.RelocationModel(); got != "pic" {
 		t.Fatalf("c-shared relocation model: got %q, want pic", got)
 	}
+	if got := config.DefaultBinaryExtension(); got != ".so" {
+		t.Fatalf("default c-shared extension: got %q, want .so", got)
+	}
+
+	windowsConfig := Config{
+		Options: &Options{BuildMode: "c-shared", Opt: "z"},
+		Target:  &TargetSpec{Triple: "x86_64-unknown-windows-gnu"},
+	}
+	if got := windowsConfig.DefaultBinaryExtension(); got != ".dll" {
+		t.Fatalf("windows c-shared extension: got %q, want .dll", got)
+	}
 }

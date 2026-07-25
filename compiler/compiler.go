@@ -1190,6 +1190,9 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 			functionAttr := b.ctx.CreateStringAttribute("wasm-export-name", b.info.linkName)
 			b.llvmFn.AddFunctionAttr(functionAttr)
 		}
+		// Windows PE exports are handled at link time with --export-all-symbols
+		// (see builder.NewConfig). dllexport is a DLL storage class, not a
+		// function attribute, so it is not set here.
 		// LTO generally optimizes externally called functions away unless they
 		// are explicitly marked as used.
 		llvmutil.AppendToGlobal(b.mod, "llvm.used", b.llvmFn)

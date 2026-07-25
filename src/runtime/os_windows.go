@@ -43,38 +43,18 @@ type peSection struct {
 	characteristics      uint32
 }
 
-var module *exeHeader
+// scanPEModuleGlobals walks the PE section table of module and reports every
+// writable section to found. module must point at the image base (MZ header).
+func scanPEModuleGlobals(module *exeHeader, found func(start, end uintptr)) {
+	const IMAGE_SCN_MEM_WRITE = 0x80000000 // https://docs.microsoft.com/en-us/windows/win32/debug/pe-format
 
-// Mark global variables.
-// Unfortunately, the linker doesn't provide symbols for the start and end of
-// the data/bss sections. Therefore these addresses need to be determined at
-// runtime. This might seem complex and it kind of is, but it only compiles to
-// around 160 bytes of amd64 instructions.
-// Most of this function is based on the documentation in
-// https://docs.microsoft.com/en-us/windows/win32/debug/pe-format.
-func findGlobals(found func(start, end uintptr)) {
-	// Constants used in this function.
-	const (
-		// https://docs.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandleexa
-		GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT = 0x00000002
-
-		// https://docs.microsoft.com/en-us/windows/win32/debug/pe-format
-		IMAGE_SCN_MEM_WRITE = 0x80000000
-	)
-
-	if module == nil {
-		// Obtain a handle to the currently executing image. What we're getting
-		// here is really just __ImageBase, but it's probably better to obtain
-		// it using GetModuleHandle to account for ASLR etc.
-		result := _GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, nil, &module)
-		if gcAsserts && (!result || module.signature != 0x5A4D) { // 0x4D5A is "MZ"
-			runtimePanic("cannot get module handle")
-		}
+	if gcAsserts && (module == nil || module.signature != 0x5A4D) { // "MZ"
+		runtimePanic("cannot get module handle")
 	}
 
 	// Find the PE header at offset 0x3C.
 	pe := (*peHeader)(unsafe.Add(unsafe.Pointer(module), module.peHeader))
-	if gcAsserts && pe.magic != 0x00004550 { // 0x4550 is "PE"
+	if gcAsserts && pe.magic != 0x00004550 { // "PE"
 		runtimePanic("cannot find PE header")
 	}
 
@@ -84,7 +64,7 @@ func findGlobals(found func(start, end uintptr)) {
 		if section.characteristics&IMAGE_SCN_MEM_WRITE != 0 {
 			// Found a writable section. Scan the entire section for roots.
 			start := uintptr(unsafe.Pointer(module)) + uintptr(section.virtualAddress)
-			end := uintptr(unsafe.Pointer(module)) + uintptr(section.virtualAddress) + uintptr(section.virtualSize)
+			end := start + uintptr(section.virtualSize)
 			found(start, end)
 		}
 		section = (*peSection)(unsafe.Add(unsafe.Pointer(section), unsafe.Sizeof(peSection{})))

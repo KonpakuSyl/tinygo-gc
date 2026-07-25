@@ -718,7 +718,13 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	linkerDependencies := []*compileJob{outputObjectFileJob}
 	result.Executable = filepath.Join(tmpdir, "main")
 	if config.GOOS() == "windows" {
-		result.Executable += ".exe"
+		if config.BuildMode() == "c-shared" {
+			result.Executable += ".dll"
+		} else {
+			result.Executable += ".exe"
+		}
+	} else if config.BuildMode() == "c-shared" && !strings.HasPrefix(config.Triple(), "wasm32-") {
+		result.Executable += ".so"
 	}
 	result.Binary = result.Executable // final file
 	ldflags := append(config.LDFlags(), "-o", result.Executable)

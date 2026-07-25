@@ -338,8 +338,14 @@ func (c *Config) DefaultBinaryExtension() string {
 		return ".wasm"
 	}
 	if len(parts) >= 3 && parts[2] == "windows" {
+		if c.BuildMode() == "c-shared" {
+			return ".dll"
+		}
 		// Windows uses .exe.
 		return ".exe"
+	}
+	if c.BuildMode() == "c-shared" {
+		return ".so"
 	}
 	if len(parts) >= 3 && parts[2] == "unknown" {
 		// There appears to be a convention to use the .elf file extension for

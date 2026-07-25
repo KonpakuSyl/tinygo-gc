@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 
 	"github.com/tinygo-org/tinygo/compileopts"
 	"github.com/tinygo-org/tinygo/goenv"
@@ -78,8 +79,11 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 		}
 	}
 	if config.BuildMode() == "c-shared" {
-		if config.GOOS() != "linux" {
-			return nil, fmt.Errorf("native buildmode c-shared is currently supported only on linux")
+		switch config.GOOS() {
+		case "linux", "windows":
+			// supported
+		default:
+			return nil, fmt.Errorf("native buildmode c-shared is currently supported only on linux and windows")
 		}
 		if config.GC() != "manual" {
 			return nil, fmt.Errorf("native buildmode c-shared currently requires -gc=manual")
@@ -87,19 +91,35 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 		if config.Scheduler() != "none" {
 			return nil, fmt.Errorf("native buildmode c-shared currently requires -scheduler=none")
 		}
-		// The Linux target normally includes its thread scheduler and signal
-		// support as C objects. They are not used with scheduler=none and leave
-		// process-wide hooks in a shared library. The futex implementation stays
-		// linked because the allocator mutex uses it even without goroutines.
+		// scheduler=none does not provide tinygo_task_exit, so drop the
+		// cooperative task-stack assembly that would otherwise be linked in
+		// through the default hosted target ExtraFiles list.
 		config.Target.ExtraFiles = slices.DeleteFunc(config.Target.ExtraFiles, func(path string) bool {
-			switch path {
-			case "src/internal/task/task_threads.c", "src/runtime/runtime_unix.c", "src/runtime/signal.c":
-				return true
-			default:
-				return false
-			}
+			base := filepath.Base(path)
+			return strings.HasPrefix(base, "task_stack_") && (strings.HasSuffix(base, ".S") || strings.HasSuffix(base, ".c"))
 		})
-		config.Target.ExtraFiles = append(config.Target.ExtraFiles, "src/runtime/cshared/runtime_cshared_linux.c")
+		switch config.GOOS() {
+		case "linux":
+			// The Linux target normally includes its thread scheduler and signal
+			// support as C objects. They are not used with scheduler=none and leave
+			// process-wide hooks in a shared library. The futex implementation stays
+			// linked because the allocator mutex uses it even without goroutines.
+			config.Target.ExtraFiles = slices.DeleteFunc(config.Target.ExtraFiles, func(path string) bool {
+				switch path {
+				case "src/internal/task/task_threads.c", "src/runtime/runtime_unix.c", "src/runtime/signal.c":
+					return true
+				default:
+					return false
+				}
+			})
+			config.Target.ExtraFiles = append(config.Target.ExtraFiles, "src/runtime/cshared/runtime_cshared_linux.c")
+		case "windows":
+			// Windows executables pin a fixed image base and disable ASLR. Those
+			// flags are hostile to DLLs, which must be relocatable and export
+			// their public symbols for LoadLibrary/GetProcAddress.
+			config.Target.LDFlags = filterWindowsCSharedLDFlags(config.Target.LDFlags)
+			config.Target.LDFlags = append(config.Target.LDFlags, "--export-all-symbols")
+		}
 	}
 	for _, path := range options.ExtraFiles {
 		if path == "" {
@@ -136,4 +156,29 @@ func manualGCSupported(config *compileopts.Config) bool {
 		}
 	}
 	return true
+}
+
+// filterWindowsCSharedLDFlags drops executable-only PE flags that break DLL
+// loading (fixed image base / disabled dynamic base).
+func filterWindowsCSharedLDFlags(flags []string) []string {
+	filtered := make([]string, 0, len(flags))
+	skipNext := false
+	for _, flag := range flags {
+		if skipNext {
+			skipNext = false
+			continue
+		}
+		switch flag {
+		case "--image-base":
+			skipNext = true
+			continue
+		case "--no-dynamicbase":
+			continue
+		}
+		if strings.HasPrefix(flag, "--image-base=") {
+			continue
+		}
+		filtered = append(filtered, flag)
+	}
+	return filtered
 }

@@ -3,6 +3,7 @@ package builder
 import (
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/tinygo-org/tinygo/compileopts"
@@ -117,5 +118,62 @@ func TestManualCSharedConfigLinux(t *testing.T) {
 	}
 	if !slices.Contains(config.Target.ExtraFiles, "src/runtime/cshared/runtime_cshared_linux.c") {
 		t.Errorf("c-shared target does not include runtime_cshared_linux.c: %v", config.Target.ExtraFiles)
+	}
+}
+
+func TestManualCSharedConfigWindows(t *testing.T) {
+	config, err := NewConfig(&compileopts.Options{
+		GOOS:       "windows",
+		GOARCH:     "amd64",
+		BuildMode:  "c-shared",
+		GC:         "manual",
+		ManualSize: 1024,
+		Scheduler:  "none",
+	})
+	if err != nil {
+		t.Fatalf("NewConfig() failed: %v", err)
+	}
+	if config.BuildMode() != "c-shared" || !slices.Contains(config.BuildTags(), "tinygo.cshared") {
+		t.Fatalf("c-shared configuration: mode=%q tags=%v", config.BuildMode(), config.BuildTags())
+	}
+	if config.DefaultBinaryExtension() != ".dll" {
+		t.Fatalf("windows c-shared extension: got %q, want .dll", config.DefaultBinaryExtension())
+	}
+	for _, flag := range config.Target.LDFlags {
+		if flag == "--no-dynamicbase" || flag == "--image-base" || strings.HasPrefix(flag, "--image-base=") {
+			t.Errorf("windows c-shared LDFlags still contains executable-only flag %q: %v", flag, config.Target.LDFlags)
+		}
+	}
+	if !slices.Contains(config.Target.LDFlags, "--export-all-symbols") {
+		t.Errorf("windows c-shared LDFlags missing --export-all-symbols: %v", config.Target.LDFlags)
+	}
+	// Windows PE globals scanning is pure Go; no extra C file is required.
+	if slices.Contains(config.Target.ExtraFiles, "src/runtime/cshared/runtime_cshared_linux.c") {
+		t.Errorf("windows c-shared unexpectedly includes linux cshared file: %v", config.Target.ExtraFiles)
+	}
+	for _, path := range config.Target.ExtraFiles {
+		base := filepath.Base(path)
+		if strings.HasPrefix(base, "task_stack_") {
+			t.Errorf("windows c-shared still includes task stack file %q", path)
+		}
+	}
+}
+
+func TestFilterWindowsCSharedLDFlags(t *testing.T) {
+	got := filterWindowsCSharedLDFlags([]string{
+		"-m", "i386pep",
+		"--image-base", "0x400000",
+		"--gc-sections",
+		"--no-insert-timestamp",
+		"--no-dynamicbase",
+		"--image-base=0x1000",
+	})
+	for _, flag := range got {
+		if flag == "--no-dynamicbase" || flag == "--image-base" || flag == "0x400000" || flag == "0x1000" || strings.HasPrefix(flag, "--image-base=") {
+			t.Fatalf("filterWindowsCSharedLDFlags kept %q in %v", flag, got)
+		}
+	}
+	if !slices.Contains(got, "-m") || !slices.Contains(got, "i386pep") || !slices.Contains(got, "--gc-sections") {
+		t.Fatalf("filterWindowsCSharedLDFlags dropped required flags: %v", got)
 	}
 }
