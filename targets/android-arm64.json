@@ -1,0 +1,25 @@
+{
+  "llvm-target": "aarch64-unknown-linux-android29",
+  "cpu": "generic",
+  "features": "+ete,+fp-armv8,+neon,+trbe,+v8a,-fmv,-outline-atomics",
+  "goos": "android",
+  "goarch": "arm64",
+  "android-api": 29,
+  "gc": "precise",
+  "scheduler": "threads",
+  "linker": "ld.lld",
+  "rtlib": "compiler-rt",
+  "libc": "bionic",
+  "cflags": ["-mno-outline-atomics"],
+  "ldflags": ["--gc-sections", "-z", "max-page-size=16384"],
+  "flash-method": "adb",
+  "adb-push-remote": "/data/local/tmp/tinygo-app",
+  "adb-post-commands": ["chmod 755 {remote}", "{remote}"],
+  "extra-files": [
+    "src/internal/futex/futex_linux.c",
+    "src/internal/task/task_threads.c",
+    "src/runtime/runtime_unix.c",
+    "src/runtime/signal.c",
+    "src/runtime/asm_arm64.S"
+  ]
+}

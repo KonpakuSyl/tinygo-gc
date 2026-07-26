@@ -11,14 +11,24 @@ import (
 	"tinygo.org/x/go-llvm"
 )
 
+// syscallGOOS normalizes GOOS values that share a system call interface.
+// Android runs on the Linux kernel, with the same calling convention.
+func syscallGOOS(goos string) string {
+	if goos == "android" {
+		return "linux"
+	}
+	return goos
+}
+
 // createRawSyscall creates a system call with the provided system call number
 // and returns the result as a single integer (the system call result). The
 // result is not further interpreted (with the exception of MIPS to use the same
 // return value everywhere).
 func (b *builder) createRawSyscall(call *ssa.CallCommon) (llvm.Value, error) {
 	num := b.getValue(call.Args[0], getPos(call))
+	goos := syscallGOOS(b.GOOS)
 	switch {
-	case b.GOARCH == "amd64" && b.GOOS == "linux":
+	case b.GOARCH == "amd64" && goos == "linux":
 		// Sources:
 		//   https://stackoverflow.com/a/2538212
 		//   https://en.wikibooks.org/wiki/X86_Assembly/Interfacing_with_Linux#syscall
@@ -46,7 +56,7 @@ func (b *builder) createRawSyscall(call *ssa.CallCommon) (llvm.Value, error) {
 		target := llvm.InlineAsm(fnType, "syscall", constraints, true, false, llvm.InlineAsmDialectIntel, false)
 		return b.CreateCall(fnType, target, args, ""), nil
 
-	case b.GOARCH == "386" && b.GOOS == "linux":
+	case b.GOARCH == "386" && goos == "linux":
 		// Sources:
 		//   syscall(2) man page
 		//   https://stackoverflow.com/a/2538212
@@ -73,7 +83,7 @@ func (b *builder) createRawSyscall(call *ssa.CallCommon) (llvm.Value, error) {
 		target := llvm.InlineAsm(fnType, "int 0x80", constraints, true, false, llvm.InlineAsmDialectIntel, false)
 		return b.CreateCall(fnType, target, args, ""), nil
 
-	case b.GOARCH == "arm" && b.GOOS == "linux":
+	case b.GOARCH == "arm" && goos == "linux":
 		if arch := b.archFamily(); arch != "arm" {
 			// Some targets pretend to be linux/arm for compatibility but aren't
 			// actually such a system. Make sure we emit an error instead of
@@ -114,7 +124,7 @@ func (b *builder) createRawSyscall(call *ssa.CallCommon) (llvm.Value, error) {
 		target := llvm.InlineAsm(fnType, "svc #0", constraints, true, false, 0, false)
 		return b.CreateCall(fnType, target, args, ""), nil
 
-	case b.GOARCH == "arm64" && b.GOOS == "linux":
+	case b.GOARCH == "arm64" && goos == "linux":
 		// Source: syscall(2) man page.
 		args := []llvm.Value{}
 		argTypes := []llvm.Type{}
@@ -147,7 +157,7 @@ func (b *builder) createRawSyscall(call *ssa.CallCommon) (llvm.Value, error) {
 		target := llvm.InlineAsm(fnType, "svc #0", constraints, true, false, 0, false)
 		return b.CreateCall(fnType, target, args, ""), nil
 
-	case (b.GOARCH == "mips" || b.GOARCH == "mipsle") && b.GOOS == "linux":
+	case (b.GOARCH == "mips" || b.GOARCH == "mipsle") && goos == "linux":
 		// Implement the system call convention for Linux.
 		// Source: syscall(2) man page and musl:
 		// https://git.musl-libc.org/cgit/musl/tree/arch/mips/syscall_arch.h
@@ -246,7 +256,7 @@ func (b *builder) createRawSyscall(call *ssa.CallCommon) (llvm.Value, error) {
 // createSyscall emits instructions for the syscall.Syscall* family of
 // functions, depending on the target OS/arch.
 func (b *builder) createSyscall(call *ssa.CallCommon) (llvm.Value, error) {
-	switch b.GOOS {
+	switch syscallGOOS(b.GOOS) {
 	case "linux":
 		syscallResult, err := b.createRawSyscall(call)
 		if err != nil {

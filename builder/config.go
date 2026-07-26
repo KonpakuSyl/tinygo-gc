@@ -63,6 +63,22 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 		GoMinorVersion: gorootMinor,
 		TestConfig:     options.TestConfig,
 	}
+	if config.Target.Libc == "bionic" {
+		// Android needs an NDK sysroot, which is found through the environment
+		// instead of being shipped with TinyGo.
+		if err := configureAndroidTarget(config.Target); err != nil {
+			return nil, err
+		}
+		if api := config.AndroidAPI(); api < compileopts.AndroidELFTLSAPI {
+			// The thread scheduler keeps the current task in a thread-local
+			// variable, which the loader ignores on older Android versions.
+			switch config.Scheduler() {
+			case "threads", "cores":
+				return nil, fmt.Errorf("-scheduler=%s needs Android API level %d or later for thread-local storage, but this build targets API level %d (set TINYGO_ANDROID_API=%d, or use -scheduler=none)",
+					config.Scheduler(), compileopts.AndroidELFTLSAPI, api, compileopts.AndroidELFTLSAPI)
+			}
+		}
+	}
 	// defaultTarget adds the Boehm bridge before command-line GC overrides are
 	// applied. Do not compile that bridge for a different collector.
 	if config.GC() != "boehm" {
@@ -75,15 +91,15 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 			return nil, fmt.Errorf("-gc=manual requires --manual-size or a target manual-size")
 		}
 		if !manualGCSupported(config) {
-			return nil, fmt.Errorf("-gc=manual is currently supported only on darwin, hosted linux, windows, and wasm targets")
+			return nil, fmt.Errorf("-gc=manual is currently supported only on darwin, hosted linux, android, windows, and wasm targets")
 		}
 	}
 	if config.BuildMode() == "c-shared" {
 		switch config.GOOS() {
-		case "linux", "windows":
+		case "linux", "android", "windows":
 			// supported
 		default:
-			return nil, fmt.Errorf("native buildmode c-shared is currently supported only on linux and windows")
+			return nil, fmt.Errorf("native buildmode c-shared is currently supported only on linux, android, and windows")
 		}
 		if config.GC() != "manual" {
 			return nil, fmt.Errorf("native buildmode c-shared currently requires -gc=manual")
@@ -99,7 +115,7 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 			return strings.HasPrefix(base, "task_stack_") && (strings.HasSuffix(base, ".S") || strings.HasSuffix(base, ".c"))
 		})
 		switch config.GOOS() {
-		case "linux":
+		case "linux", "android":
 			// The Linux target normally includes its thread scheduler and signal
 			// support as C objects. They are not used with scheduler=none and leave
 			// process-wide hooks in a shared library. The futex implementation stays
@@ -139,7 +155,12 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 }
 
 func manualGCSupported(config *compileopts.Config) bool {
-	if config.GOOS() == "darwin" || config.GOOS() == "windows" || config.GOARCH() == "wasm" {
+	switch config.GOOS() {
+	case "darwin", "windows", "android":
+		// Android is a hosted system with a regular mmap, like the others here.
+		return true
+	}
+	if config.GOARCH() == "wasm" {
 		return true
 	}
 	if config.GOOS() != "linux" {

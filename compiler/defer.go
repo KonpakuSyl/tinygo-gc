@@ -163,9 +163,9 @@ mov x0, #0
 1:
 `
 		constraints = "={x0},{x1},~{x1},~{x2},~{x3},~{x4},~{x5},~{x6},~{x7},~{x8},~{x9},~{x10},~{x11},~{x12},~{x13},~{x14},~{x15},~{x16},~{x17},~{x19},~{x20},~{x21},~{x22},~{x23},~{x24},~{x25},~{x26},~{x27},~{x28},~{lr},~{q0},~{q1},~{q2},~{q3},~{q4},~{q5},~{q6},~{q7},~{q8},~{q9},~{q10},~{q11},~{q12},~{q13},~{q14},~{q15},~{q16},~{q17},~{q18},~{q19},~{q20},~{q21},~{q22},~{q23},~{q24},~{q25},~{q26},~{q27},~{q28},~{q29},~{q30},~{nzcv},~{ffr},~{memory}"
-		if b.GOOS != "darwin" && b.GOOS != "windows" {
-			// These registers cause the following warning when compiling for
-			// MacOS and Windows:
+		if aarch64PlatformRegisterFree(b.GOOS) {
+			// On systems that reserve these registers, listing them produces
+			// the following warning:
 			//     warning: inline asm clobber list contains reserved registers:
 			//     X18, FP
 			//     Reserved registers on the clobber list may not be preserved
@@ -224,6 +224,19 @@ li a0, 0
 	result.AddCallSiteAttribute(-1, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("returns_twice"), 0))
 	isZero := b.CreateICmp(llvm.IntEQ, result, llvm.ConstInt(resultType, 0, false), "setjmp.result")
 	return isZero
+}
+
+// aarch64PlatformRegisterFree returns whether x18 and the frame pointer can be
+// clobbered freely on this operating system. MacOS, Windows, and Android reserve
+// x18 for the platform (Android uses it for the shadow call stack), so they must
+// not appear in an inline assembly clobber list.
+func aarch64PlatformRegisterFree(goos string) bool {
+	switch goos {
+	case "darwin", "windows", "android":
+		return false
+	default:
+		return true
+	}
 }
 
 // createInvokeCheckpoint saves the function state at the given point, to

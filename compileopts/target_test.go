@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -31,6 +32,73 @@ func TestLoadTarget(t *testing.T) {
 		t.Fatalf("unexpected GNU target libc configuration: %#v", gnuTarget)
 	}
 
+}
+
+func TestLoadTargetAndroid(t *testing.T) {
+	for _, name := range []string{"android-arm64", "android-amd64"} {
+		spec, err := LoadTarget(&Options{Target: name})
+		if err != nil {
+			t.Fatalf("could not load %s target: %v", name, err)
+		}
+		if spec.GOOS != "android" || spec.Libc != "bionic" {
+			t.Errorf("%s: unexpected goos/libc: %q/%q", name, spec.GOOS, spec.Libc)
+		}
+		if spec.AndroidAPI != DefaultAndroidAPI {
+			t.Errorf("%s: android-api is %d, want %d", name, spec.AndroidAPI, DefaultAndroidAPI)
+		}
+		// The sysroot is found through the environment, not shipped with TinyGo.
+		if spec.Sysroot != "" {
+			t.Errorf("%s: target should not pin a sysroot, got %q", name, spec.Sysroot)
+		}
+		env := AndroidEnvironment(spec.GOARCH, spec.AndroidAPI)
+		if !strings.HasSuffix(spec.Triple, "-"+env) {
+			t.Errorf("%s: triple %q does not end in %q", name, spec.Triple, env)
+		}
+		// tinygo flash pushes the binary over adb and runs it.
+		if spec.FlashMethod != "adb" || spec.ADBPushRemote == "" {
+			t.Errorf("%s: unexpected flash configuration: %q %q", name, spec.FlashMethod, spec.ADBPushRemote)
+		}
+	}
+
+	// Android targets should be listed by "tinygo targets".
+	specs, err := GetTargetSpecs()
+	if err != nil {
+		t.Fatal("GetTargetSpecs failed:", err)
+	}
+	for _, name := range []string{"android-arm64", "android-amd64"} {
+		if _, ok := specs[name]; !ok {
+			t.Errorf("target %q is missing from the target listing", name)
+		}
+	}
+}
+
+// Android can also be selected through GOOS/GOARCH, without a target file.
+func TestDefaultTargetAndroid(t *testing.T) {
+	for _, tc := range []struct {
+		goarch string
+		triple string
+	}{
+		{"arm64", "aarch64-unknown-linux-android29"},
+		{"amd64", "x86_64-unknown-linux-android29"},
+	} {
+		spec, err := defaultTarget(&Options{GOOS: "android", GOARCH: tc.goarch, GOARM: "7"})
+		if err != nil {
+			t.Fatalf("defaultTarget(android/%s) failed: %v", tc.goarch, err)
+		}
+		if spec.Triple != tc.triple {
+			t.Errorf("android/%s triple: got %q, want %q", tc.goarch, spec.Triple, tc.triple)
+		}
+		if spec.Libc != "bionic" || spec.Linker != "ld.lld" {
+			t.Errorf("android/%s: unexpected libc/linker: %q/%q", tc.goarch, spec.Libc, spec.Linker)
+		}
+		if spec.GC == "boehm" {
+			// The Boehm collector is not built against bionic.
+			t.Errorf("android/%s should not default to the boehm collector", tc.goarch)
+		}
+		if !slices.Contains(spec.ExtraFiles, "src/runtime/runtime_unix.c") {
+			t.Errorf("android/%s is missing the unix runtime: %v", tc.goarch, spec.ExtraFiles)
+		}
+	}
 }
 
 func TestGetTargetSpecs_InheritableOnlyTargetsExcluded(t *testing.T) {

@@ -3,6 +3,7 @@ package builder
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/tinygo-org/tinygo/compileopts"
@@ -228,6 +229,15 @@ var libCompilerRT = Library{
 	},
 	librarySources: func(target string, _ bool) ([]string, error) {
 		builtins := append([]string{}, genericBuiltins...) // copy genericBuiltins
+		if isAndroidTriple(target) {
+			// The Android version of __isOSVersionAtLeast reads system
+			// properties and therefore needs bionic headers, which aren't
+			// available while building the compiler runtime. Nothing in TinyGo
+			// calls it: it only backs Clang availability checks.
+			builtins = slices.DeleteFunc(builtins, func(path string) bool {
+				return path == "os_version_check.c"
+			})
+		}
 		switch compileopts.CanonicalArchName(target) {
 		case "arm":
 			builtins = append(builtins, aeabiBuiltins...)

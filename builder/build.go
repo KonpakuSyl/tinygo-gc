@@ -206,6 +206,23 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			)
 		}
 		lateLDFlags = glibc.linkFlags
+	case "bionic":
+		bionic, err := prepareBionicSysroot(config)
+		if err != nil {
+			return BuildResult{}, err
+		}
+		config.Target.LDFlags = append(config.Target.LDFlags, "--sysroot="+bionic.path)
+		if config.BuildMode() != "c-shared" {
+			// Android only runs position-independent executables, which are
+			// shared objects with an interpreter and an entry point.
+			config.Target.LDFlags = append(config.Target.LDFlags,
+				"-pie",
+				"--dynamic-linker", config.AndroidDynamicLinker(),
+			)
+		}
+		// crtbegin goes before the program objects, crtend after everything.
+		config.Target.LDFlags = append(config.Target.LDFlags, bionic.crtBegin)
+		lateLDFlags = append(bionic.linkFlags, bionic.crtEnd)
 	case "":
 		// no library specified, so nothing to do
 	default:

@@ -41,6 +41,7 @@ type TargetSpec struct {
 	RTLib            string   `json:"rtlib,omitempty"` // compiler runtime library (libgcc, compiler-rt)
 	Libc             string   `json:"libc,omitempty"`
 	Sysroot          string   `json:"sysroot,omitempty"`
+	AndroidAPI       uint64   `json:"android-api,omitempty"`          // Android API level to build against (bionic only).
 	AutoStackSize    *bool    `json:"automatic-stack-size,omitempty"` // Determine stack size automatically at compile time.
 	DefaultStackSize uint64   `json:"default-stack-size,omitempty"`   // Default stack size if the size couldn't be determined at compile time.
 	ManualSize       uint64   `json:"manual-size,omitempty"`          // Fixed heap size for gc.manual.
@@ -450,6 +451,33 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			"src/internal/task/task_threads.c",
 			"src/runtime/runtime_unix.c",
 			"src/runtime/signal.c")
+	case "android":
+		// Android runs a Linux kernel with the bionic C library. Everything is
+		// dynamically linked against the NDK sysroot, both for executables and
+		// for shared libraries loaded through System.loadLibrary.
+		llvmos = "linux"
+		spec.GC = "precise"
+		spec.Scheduler = "threads"
+		spec.Linker = "ld.lld"
+		spec.RTLib = "compiler-rt"
+		spec.Libc = "bionic"
+		spec.AndroidAPI = DefaultAndroidAPI
+		spec.LDFlags = append(spec.LDFlags, "--gc-sections")
+		if options.GOARCH == "arm64" || options.GOARCH == "amd64" {
+			// Recent Android devices can use page sizes larger than 4kB, and
+			// the loader rejects binaries that assume a smaller one.
+			spec.LDFlags = append(spec.LDFlags, "-z", "max-page-size=16384")
+		}
+		if options.GOARCH == "arm64" {
+			// Same reasoning as on Linux: outline atomics live in a support
+			// library we don't build.
+			spec.CFlags = append(spec.CFlags, "-mno-outline-atomics")
+		}
+		spec.ExtraFiles = append(spec.ExtraFiles,
+			"src/internal/futex/futex_linux.c",
+			"src/internal/task/task_threads.c",
+			"src/runtime/runtime_unix.c",
+			"src/runtime/signal.c")
 	case "windows":
 		spec.GC = "boehm"
 		spec.Scheduler = "tasks"
@@ -504,6 +532,8 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 	spec.Triple = llvmarch + "-" + llvmvendor + "-" + llvmos
 	if options.GOOS == "windows" {
 		spec.Triple += "-gnu"
+	} else if options.GOOS == "android" {
+		spec.Triple += "-" + AndroidEnvironment(options.GOARCH, spec.AndroidAPI)
 	} else if options.GOOS == "linux" {
 		// We use musl on Linux (not glibc) so we should use -musleabi* instead
 		// of -gnueabi*.

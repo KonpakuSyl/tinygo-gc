@@ -22,6 +22,7 @@ func TestManualGCSupported(t *testing.T) {
 		{name: "wasm", goos: "js", goarch: "wasm", want: true},
 		{name: "baremetal linux", goos: "linux", goarch: "arm", tags: []string{"baremetal"}, want: false},
 		{name: "windows", goos: "windows", goarch: "amd64", want: true},
+		{name: "android", goos: "android", goarch: "arm64", want: true},
 	}
 
 	for _, test := range tests {
@@ -156,6 +157,61 @@ func TestManualCSharedConfigWindows(t *testing.T) {
 		if strings.HasPrefix(base, "task_stack_") {
 			t.Errorf("windows c-shared still includes task stack file %q", path)
 		}
+	}
+}
+
+func TestManualCSharedConfigAndroid(t *testing.T) {
+	clearAndroidEnv(t)
+	sysroot := fakeAndroidSysroot(t, t.TempDir(), "aarch64-linux-android", "21")
+	t.Setenv("TINYGO_ANDROID_SYSROOT", sysroot)
+
+	config, err := NewConfig(&compileopts.Options{
+		Target:     "android-arm64",
+		BuildMode:  "c-shared",
+		GC:         "manual",
+		ManualSize: 1024,
+		Scheduler:  "none",
+	})
+	if err != nil {
+		t.Fatalf("NewConfig() failed: %v", err)
+	}
+	if config.BuildMode() != "c-shared" || !slices.Contains(config.BuildTags(), "tinygo.cshared") {
+		t.Fatalf("c-shared configuration: mode=%q tags=%v", config.BuildMode(), config.BuildTags())
+	}
+	if config.DefaultBinaryExtension() != ".so" {
+		t.Errorf("android c-shared extension: got %q, want .so", config.DefaultBinaryExtension())
+	}
+	if config.Target.Sysroot != sysroot {
+		t.Errorf("sysroot: got %q, want %q", config.Target.Sysroot, sysroot)
+	}
+	// Same reasoning as on Linux: process-wide hooks and cooperative task
+	// switching don't belong in a shared library.
+	for _, forbidden := range []string{
+		"src/internal/task/task_threads.c",
+		"src/runtime/runtime_unix.c",
+		"src/runtime/signal.c",
+	} {
+		if slices.Contains(config.Target.ExtraFiles, forbidden) {
+			t.Errorf("android c-shared target includes %q", forbidden)
+		}
+	}
+	if !slices.Contains(config.Target.ExtraFiles, "src/runtime/cshared/runtime_cshared_linux.c") {
+		t.Errorf("android c-shared target does not include the ELF globals scanner: %v", config.Target.ExtraFiles)
+	}
+	if !slices.Contains(config.Target.ExtraFiles, "src/internal/futex/futex_linux.c") {
+		t.Errorf("android c-shared target should keep the futex implementation: %v", config.Target.ExtraFiles)
+	}
+}
+
+func TestAndroidConfigWithoutNDK(t *testing.T) {
+	clearAndroidEnv(t)
+
+	_, err := NewConfig(&compileopts.Options{Target: "android-arm64"})
+	if err == nil {
+		t.Fatal("NewConfig should have failed without an Android NDK")
+	}
+	if !strings.Contains(err.Error(), "ANDROID_NDK_HOME") {
+		t.Errorf("error should explain how to point TinyGo at an NDK: %v", err)
 	}
 }
 

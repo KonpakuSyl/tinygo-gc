@@ -28,7 +28,13 @@
 // Pointer to the current task.Task structure.
 // Ideally the entire task.Task structure would be a thread-local variable but
 // this also works.
+#if defined(__ANDROID__)
+// Bionic rejects executables whose TLS segment is aligned to less than 64 bytes
+// on arm64. The segment alignment follows the alignment of the variables in it.
+static __thread void *current_task __attribute__((aligned(64)));
+#else
 static __thread void *current_task;
+#endif
 
 struct state_pass {
     void      *(*start)(void*);

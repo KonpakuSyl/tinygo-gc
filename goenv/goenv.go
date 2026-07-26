@@ -107,9 +107,13 @@ func Get(name string) string {
 		goos := os.Getenv("GOOS")
 		if goos == "" {
 			goos = runtime.GOOS
-		}
-		if goos == "android" {
-			goos = "linux"
+			if goos == "android" {
+				// TinyGo itself is running on Android (for example in Termux).
+				// Build for the host as if it were a regular Linux system.
+				// Building for Android as a target requires GOOS=android to be
+				// set explicitly, because it needs an NDK sysroot.
+				goos = "linux"
+			}
 		}
 		return goos
 	case "GOARCH":

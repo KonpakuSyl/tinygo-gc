@@ -51,8 +51,3 @@ func cstring(s string) []byte {
 
 //export fork
 func libc_fork() int32
-
-// Internal musl function to get the C errno pointer.
-//
-//export __errno_location
-func libc_errno() *int32

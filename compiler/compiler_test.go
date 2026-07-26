@@ -320,3 +320,18 @@ func testCompilePackage(t *testing.T, options *compileopts.Options, file string)
 	pkg := lprogram.MainPkg()
 	return CompilePackage(file, pkg, program.Package(pkg.Pkg), machine, compilerConfig, false)
 }
+
+func TestAArch64PlatformRegisterFree(t *testing.T) {
+	// x18 is a general purpose register on Linux, but reserved on MacOS,
+	// Windows, and Android.
+	for goos, want := range map[string]bool{
+		"linux":   true,
+		"darwin":  false,
+		"windows": false,
+		"android": false,
+	} {
+		if got := aarch64PlatformRegisterFree(goos); got != want {
+			t.Errorf("aarch64PlatformRegisterFree(%q) = %v, want %v", goos, got, want)
+		}
+	}
+}

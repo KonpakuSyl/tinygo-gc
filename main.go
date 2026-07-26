@@ -397,7 +397,13 @@ func Flash(pkgName, port, outpath string, options *compileopts.Options) error {
 	case "bmp":
 		fileExt = ".elf"
 	case "adb":
-		fileExt = ".hex"
+		// The pushed file is whatever the device expects: a firmware image when
+		// the Android host only forwards it to a microcontroller, or the binary
+		// itself when Android is the target.
+		fileExt = filepath.Ext(config.Target.ADBPushRemote)
+		if fileExt == "" {
+			fileExt = config.DefaultBinaryExtension()
+		}
 	case "esp32flash", "esp32jtag":
 		fileExt = ".bin"
 	case "native":

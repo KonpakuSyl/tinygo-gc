@@ -3,13 +3,9 @@
 package runtime
 
 // This file is for systems that are _actually_ Linux (not systems that pretend
-// to be Linux, like baremetal systems).
-
-import (
-	"unsafe"
-)
-
-const GOOS = "linux"
+// to be Linux, like baremetal systems). It is shared with Android, which uses
+// the Linux kernel with a different C library. Parts that differ between the
+// two live in os_linux_nonbionic.go and os_linux_bionic.go.
 
 const (
 	// See https://github.com/torvalds/linux/blob/master/include/uapi/asm-generic/mman-common.h
@@ -31,11 +27,6 @@ const (
 	sig_SIGSEGV = linux_SIGSEGV
 )
 
-// int *__errno_location(void);
-//
-//export __errno_location
-func libc_errno_location() *int32
-
 //export getpagesize
 func libc_getpagesize() int
 
@@ -43,19 +34,6 @@ func libc_getpagesize() int
 func syscall_Getpagesize() int {
 	return libc_getpagesize()
 }
-
-func hardwareRand() (n uint64, ok bool) {
-	read := libc_getrandom(unsafe.Pointer(&n), 8, 0)
-	if read != 8 {
-		return 0, false
-	}
-	return n, true
-}
-
-// ssize_t getrandom(void buf[.buflen], size_t buflen, unsigned int flags);
-//
-//export getrandom
-func libc_getrandom(buf unsafe.Pointer, buflen uintptr, flags uint32) uint32
 
 // int fcntl(int fd, int cmd, int arg);
 //

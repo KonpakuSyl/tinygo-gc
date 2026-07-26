@@ -380,7 +380,9 @@ func (c *Config) CFlags(libclang bool) []string {
 	cflags = append(cflags, "-gdwarf-4")
 	// Use the same optimization level as TinyGo.
 	cflags = append(cflags, "-O"+c.Options.Opt)
-	if c.BuildMode() == "c-shared" {
+	if c.BuildMode() == "c-shared" || c.GOOS() == "android" {
+		// Shared libraries are position independent by definition, and Android
+		// only loads position-independent executables.
 		cflags = append(cflags, "-fPIC")
 	}
 	// Set the LLVM target triple.
@@ -460,6 +462,21 @@ func (c *Config) LibcCFlags() []string {
 			"-isystem", filepath.Join(includeRoot, "generic-glibc"),
 			"-isystem", filepath.Join(includeRoot, "x86-linux-any"),
 			"-isystem", filepath.Join(includeRoot, "any-linux-any"),
+		}
+	case "bionic":
+		sysroot := c.LibcSysroot()
+		if sysroot == "" {
+			panic("android target is missing sysroot")
+		}
+		arch, err := AndroidArch(c.GOARCH())
+		if err != nil {
+			panic(err.Error())
+		}
+		includeRoot := filepath.Join(sysroot, "usr", "include")
+		return []string{
+			"-nostdlibinc", "--sysroot=" + sysroot,
+			"-isystem", includeRoot,
+			"-isystem", filepath.Join(includeRoot, arch),
 		}
 	case "mingw-w64":
 		root := goenv.Get("TINYGOROOT")
@@ -646,6 +663,11 @@ func (c *Config) CodeModel() string {
 // values are "static", "pic", "dynamicnopic".
 func (c *Config) RelocationModel() string {
 	if c.BuildMode() == "c-shared" {
+		return "pic"
+	}
+	if c.GOOS() == "android" {
+		// Android 5.0 and later refuse to run executables that are not position
+		// independent.
 		return "pic"
 	}
 	if c.Target.RelocationModel != "" {
