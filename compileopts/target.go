@@ -41,6 +41,8 @@ type TargetSpec struct {
 	RTLib            string   `json:"rtlib,omitempty"` // compiler runtime library (libgcc, compiler-rt)
 	Libc             string   `json:"libc,omitempty"`
 	Sysroot          string   `json:"sysroot,omitempty"`
+	AppleTarget      string   `json:"apple-target,omitempty"`         // Platform and minimum version, for example ios:13.0.
+	AppleSDKVersion  string   `json:"-"`                              // Filled in by the build environment.
 	AndroidAPI       uint64   `json:"android-api,omitempty"`          // Android API level to build against (bionic only).
 	AutoStackSize    *bool    `json:"automatic-stack-size,omitempty"` // Determine stack size automatically at compile time.
 	DefaultStackSize uint64   `json:"default-stack-size,omitempty"`   // Default stack size if the size couldn't be determined at compile time.
@@ -408,13 +410,12 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		}
 		llvmvendor = "apple"
 		spec.Scheduler = "threads"
-		spec.Linker = "ld.lld"
+		spec.Linker = "ld"
 		spec.Libc = "darwin-libSystem"
 		// Use macosx* instead of darwin, otherwise darwin/arm64 will refer to
 		// iOS!
 		llvmos = "macosx" + platformVersion
 		spec.LDFlags = append(spec.LDFlags,
-			"-flavor", "darwin",
 			"-dead_strip",
 			"-arch", llvmarch,
 			"-platform_version", "macos", platformVersion, platformVersion,
@@ -545,7 +546,8 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 		}
 	}
 
-	// Add extra assembly files (needed for the scheduler etc).
+	// Add architecture assembly. Cooperative task-stack assembly is only used
+	// by the tasks and cores schedulers; threaded targets create OS threads.
 	if options.GOARCH != "wasm" {
 		suffix := ""
 		if options.GOOS == "windows" && options.GOARCH == "amd64" {
@@ -558,7 +560,9 @@ func defaultTarget(options *Options) (*TargetSpec, error) {
 			asmGoarch = "mipsx"
 		}
 		spec.ExtraFiles = append(spec.ExtraFiles, "src/runtime/asm_"+asmGoarch+suffix+".S")
-		spec.ExtraFiles = append(spec.ExtraFiles, "src/internal/task/task_stack_"+asmGoarch+suffix+".S")
+		if spec.Scheduler == "tasks" || spec.Scheduler == "cores" {
+			spec.ExtraFiles = append(spec.ExtraFiles, "src/internal/task/task_stack_"+asmGoarch+suffix+".S")
+		}
 	}
 
 	// Configure the emulator.

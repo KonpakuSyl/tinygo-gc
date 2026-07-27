@@ -344,6 +344,9 @@ func (c *Config) DefaultBinaryExtension() string {
 		// Windows uses .exe.
 		return ".exe"
 	}
+	if c.GOOS() == "darwin" && c.BuildMode() == "c-shared" {
+		return ".dylib"
+	}
 	if c.BuildMode() == "c-shared" {
 		return ".so"
 	}
@@ -418,6 +421,12 @@ func (c *Config) LibcCFlags() []string {
 			"-nostdlibinc",
 			"-isystem", filepath.Join(root, "lib/macos-minimal-sdk/src/usr/include"),
 		}
+	case "darwin-sdk":
+		sysroot := c.LibcSysroot()
+		if sysroot == "" {
+			panic("Apple SDK target is missing sysroot")
+		}
+		return []string{"-isysroot", sysroot}
 	case "picolibc":
 		root := goenv.Get("TINYGOROOT")
 		picolibcDir := filepath.Join(root, "lib", "picolibc", "newlib", "libc")

@@ -101,6 +101,16 @@ func TestDefaultTargetAndroid(t *testing.T) {
 	}
 }
 
+func TestDefaultTargetDarwinThreadsDoesNotUseTaskStackAssembly(t *testing.T) {
+	spec, err := defaultTarget(&Options{GOOS: "darwin", GOARCH: "arm64"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(spec.ExtraFiles, "src/internal/task/task_stack_arm64.S") {
+		t.Fatalf("threaded Darwin target unexpectedly includes cooperative task stack: %v", spec.ExtraFiles)
+	}
+}
+
 func TestGetTargetSpecs_InheritableOnlyTargetsExcluded(t *testing.T) {
 	specs, err := GetTargetSpecs()
 	if err != nil {
@@ -235,5 +245,28 @@ func TestCSharedConfiguration(t *testing.T) {
 	}
 	if got := windowsConfig.DefaultBinaryExtension(); got != ".dll" {
 		t.Fatalf("windows c-shared extension: got %q, want .dll", got)
+	}
+
+	darwinConfig := Config{
+		Options: &Options{BuildMode: "c-shared", Opt: "z"},
+		Target:  &TargetSpec{GOOS: "darwin", Triple: "arm64-apple-macosx11.0"},
+	}
+	if got := darwinConfig.DefaultBinaryExtension(); got != ".dylib" {
+		t.Fatalf("darwin c-shared extension: got %q, want .dylib", got)
+	}
+}
+
+func TestIOSTargets(t *testing.T) {
+	for _, target := range []string{"ios-arm64", "ios-simulator-arm64"} {
+		spec, err := LoadTarget(&Options{Target: target})
+		if err != nil {
+			t.Fatalf("LoadTarget(%q): %v", target, err)
+		}
+		if spec.GOOS != "darwin" || spec.GOARCH != "arm64" || spec.BuildMode != "c-shared" || spec.Libc != "darwin-sdk" {
+			t.Errorf("%s: unexpected target: %+v", target, spec)
+		}
+		if spec.AppleTarget == "" {
+			t.Errorf("%s: missing Apple platform configuration: %+v", target, spec)
+		}
 	}
 }

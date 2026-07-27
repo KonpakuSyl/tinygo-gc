@@ -153,8 +153,27 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	var lateLDFlags []string
 	switch config.Target.Libc {
 	case "darwin-libSystem":
-		libcJob := makeDarwinLibSystemJob(config, tmpdir)
-		libcDependencies = append(libcDependencies, libcJob)
+		if config.Target.Linker == "ld" {
+			// Apple ld requires libSystem as a library dependency. Its SDK
+			// provides the platform-specific stub, including for iOS.
+			sysroot, err := appleSDKValue("macosx", "--show-sdk-path")
+			if err != nil {
+				return BuildResult{}, err
+			}
+			config.Target.LDFlags = append(config.Target.LDFlags, "-syslibroot", sysroot)
+			lateLDFlags = append(lateLDFlags, "-lSystem")
+		} else {
+			// Keep the generated stub for explicitly configured ld.lld targets.
+			libcJob := makeDarwinLibSystemJob(config, tmpdir)
+			libcDependencies = append(libcDependencies, libcJob)
+		}
+	case "darwin-sdk":
+		if config.Target.Linker == "ld" {
+			lateLDFlags = append(lateLDFlags, "-lSystem")
+		} else {
+			libcJob := makeDarwinLibSystemJob(config, tmpdir)
+			libcDependencies = append(libcDependencies, libcJob)
+		}
 	case "musl":
 		var unlock func()
 		libcJob, unlock, err := libMusl.load(config, tmpdir)
@@ -741,7 +760,11 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 			result.Executable += ".exe"
 		}
 	} else if config.BuildMode() == "c-shared" && !strings.HasPrefix(config.Triple(), "wasm32-") {
-		result.Executable += ".so"
+		if config.GOOS() == "darwin" {
+			result.Executable += ".dylib"
+		} else {
+			result.Executable += ".so"
+		}
 	}
 	result.Binary = result.Executable // final file
 	ldflags := append(config.LDFlags(), "-o", result.Executable)
@@ -749,6 +772,16 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	if config.BuildMode() == "c-shared" {
 		if strings.HasPrefix(config.Triple(), "wasm32-") {
 			ldflags = append(ldflags, "--no-entry")
+		} else if config.GOOS() == "darwin" {
+			installName := filepath.Base(outpath)
+			if installName == "." || installName == "" {
+				if strings.HasSuffix(pkgName, ".go") {
+					installName = filepath.Base(pkgName[:len(pkgName)-3]) + ".dylib"
+				} else {
+					installName = filepath.Base(result.MainDir) + ".dylib"
+				}
+			}
+			ldflags = append(ldflags, "-dylib", "-install_name", "@rpath/"+installName)
 		} else {
 			ldflags = append(ldflags, "-shared")
 		}
@@ -874,36 +907,7 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 				ldflags = append(ldflags, dependency.result)
 			}
 			ldflags = append(ldflags, lateLDFlags...)
-			ldflags = append(ldflags, "-mllvm", "-mcpu="+config.CPU())
-			ldflags = append(ldflags, "-mllvm", "-mattr="+config.Features()) // needed for MIPS softfloat
-			if config.GOOS() == "windows" {
-				// Options for the MinGW wrapper for the lld COFF linker.
-				ldflags = append(ldflags,
-					"-Xlink=/opt:lldlto="+strconv.Itoa(speedLevel),
-					"--thinlto-cache-dir="+filepath.Join(cacheDir, "thinlto"))
-			} else if config.GOOS() == "darwin" {
-				// Options for the ld64-compatible lld linker.
-				ldflags = append(ldflags,
-					"--lto-O"+strconv.Itoa(speedLevel),
-					"-cache_path_lto", filepath.Join(cacheDir, "thinlto"))
-			} else {
-				// Options for the ELF linker.
-				ldflags = append(ldflags,
-					"--lto-O"+strconv.Itoa(speedLevel),
-					"--thinlto-cache-dir="+filepath.Join(cacheDir, "thinlto"),
-				)
-			}
-			if config.CodeModel() != "default" {
-				ldflags = append(ldflags,
-					"-mllvm", "-code-model="+config.CodeModel())
-			}
-			if sizeLevel >= 2 {
-				// Workaround with roughly the same effect as
-				// https://reviews.llvm.org/D119342.
-				// Can hopefully be removed in LLVM 19.
-				ldflags = append(ldflags,
-					"-mllvm", "--rotation-max-header-size=0")
-			}
+			ldflags = appendLinkerOptimizationFlags(ldflags, config, speedLevel, sizeLevel, cacheDir)
 			if config.Options.PrintCommands != nil {
 				config.Options.PrintCommands(config.Target.Linker, ldflags...)
 			}
@@ -1130,6 +1134,43 @@ func Build(pkgName, outpath, tmpdir string, config *compileopts.Config) (BuildRe
 	}
 
 	return result, nil
+}
+
+// appendLinkerOptimizationFlags appends options understood by the selected
+// linker. Darwin can use either Apple's ld or ld.lld, which have distinct LTO
+// option syntaxes.
+func appendLinkerOptimizationFlags(ldflags []string, config *compileopts.Config, speedLevel, sizeLevel int, cacheDir string) []string {
+	if config.Target.Linker != "ld" {
+		ldflags = append(ldflags, "-mllvm", "-mcpu="+config.CPU())
+		ldflags = append(ldflags, "-mllvm", "-mattr="+config.Features()) // needed for MIPS softfloat
+	}
+
+	switch {
+	case config.GOOS() == "windows":
+		// Options for the MinGW wrapper for the lld COFF linker.
+		ldflags = append(ldflags,
+			"-Xlink=/opt:lldlto="+strconv.Itoa(speedLevel),
+			"--thinlto-cache-dir="+filepath.Join(cacheDir, "thinlto"))
+	case config.Target.Linker == "ld":
+		// Apple's ld performs LTO itself and has its own cache option.
+		ldflags = append(ldflags, "-cache_path_lto", filepath.Join(cacheDir, "thinlto"))
+	default:
+		// LLD options, for ELF, Wasm, and explicitly configured Darwin LLD.
+		ldflags = append(ldflags,
+			"--lto-O"+strconv.Itoa(speedLevel),
+			"--thinlto-cache-dir="+filepath.Join(cacheDir, "thinlto"),
+		)
+	}
+	if config.Target.Linker != "ld" && config.CodeModel() != "default" {
+		ldflags = append(ldflags, "-mllvm", "-code-model="+config.CodeModel())
+	}
+	if config.Target.Linker != "ld" && sizeLevel >= 2 {
+		// Workaround with roughly the same effect as
+		// https://reviews.llvm.org/D119342.
+		// Can hopefully be removed in LLVM 19.
+		ldflags = append(ldflags, "-mllvm", "--rotation-max-header-size=0")
+	}
+	return ldflags
 }
 
 // createEmbedObjectFile creates a new object file with the given contents, for

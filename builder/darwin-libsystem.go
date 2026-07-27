@@ -37,22 +37,44 @@ func makeDarwinLibSystemJob(config *compileopts.Config, tmpdir string) *compileJ
 			}
 
 			// Link object file to dynamic library.
-			platformVersion := strings.TrimPrefix(strings.Split(config.Triple(), "-")[2], "macosx")
+			platform, deploymentTarget, sdkVersion := applePlatformVersions(config)
 			flags = []string{
-				"-flavor", "darwin",
-				"-demangle",
 				"-dynamic",
 				"-dylib",
 				"-arch", arch,
-				"-platform_version", "macos", platformVersion, platformVersion,
+				"-platform_version", platform, deploymentTarget, sdkVersion,
 				"-install_name", "/usr/lib/libSystem.B.dylib",
 				"-o", job.result,
 				objpath,
 			}
+			flags = addDarwinLinkerFlavor(config.Target.Linker, flags)
 			if config.Options.PrintCommands != nil {
-				config.Options.PrintCommands("ld.lld", flags...)
+				config.Options.PrintCommands(config.Target.Linker, flags...)
 			}
-			return link("ld.lld", flags...)
+			return link(config.Target.Linker, flags...)
 		},
 	}
+}
+
+// ld.lld needs its Mach-O frontend selected explicitly. Apple ld already
+// selects it, and rejects the LLD-specific -flavor option.
+func addDarwinLinkerFlavor(linker string, flags []string) []string {
+	if linker != "ld.lld" {
+		return flags
+	}
+	return append([]string{"-flavor", "darwin"}, flags...)
+}
+
+func applePlatformVersions(config *compileopts.Config) (platform, deploymentTarget, sdkVersion string) {
+	if config.Target.AppleTarget == "" {
+		platform = "macos"
+		deploymentTarget = strings.TrimPrefix(strings.Split(config.Triple(), "-")[2], "macosx")
+	} else {
+		platform, deploymentTarget, _ = parseAppleTarget(config.Target.AppleTarget)
+	}
+	sdkVersion = config.Target.AppleSDKVersion
+	if sdkVersion == "" {
+		sdkVersion = deploymentTarget
+	}
+	return
 }

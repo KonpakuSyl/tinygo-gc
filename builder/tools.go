@@ -2,6 +2,7 @@ package builder
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/scanner"
 	"go/token"
@@ -57,13 +58,8 @@ func runCCompiler(flags ...string) error {
 
 // link invokes a linker with the given name and flags.
 func link(linker string, flags ...string) error {
-	// We only support LLD.
-	if linker != "ld.lld" && linker != "wasm-ld" {
-		return fmt.Errorf("unexpected: linker %s should be ld.lld or wasm-ld", linker)
-	}
-
 	var cmd *exec.Cmd
-	if hasBuiltinTools {
+	if hasBuiltinTools && (linker == "ld.lld" || linker == "wasm-ld") {
 		cmd = exec.Command(os.Args[0], append([]string{linker}, flags...)...)
 	} else {
 		name, err := LookupCommand(linker)
@@ -82,7 +78,10 @@ func link(linker string, flags ...string) error {
 			// Therefore, show some output anyway.
 			return fmt.Errorf("failed to run linker: %w", err)
 		}
-		return parseLLDErrors(buf.String())
+		if linker == "ld.lld" || linker == "wasm-ld" {
+			return parseLLDErrors(buf.String())
+		}
+		return errors.New(strings.TrimSpace(buf.String()))
 	}
 	return nil
 }

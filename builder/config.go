@@ -79,6 +79,11 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 			}
 		}
 	}
+	if config.Target.Libc == "darwin-sdk" {
+		if err := configureAppleTarget(config.Target); err != nil {
+			return nil, err
+		}
+	}
 	// defaultTarget adds the Boehm bridge before command-line GC overrides are
 	// applied. Do not compile that bridge for a different collector.
 	if config.GC() != "boehm" {
@@ -96,10 +101,10 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 	}
 	if config.BuildMode() == "c-shared" {
 		switch config.GOOS() {
-		case "linux", "android", "windows":
+		case "darwin", "linux", "android", "windows":
 			// supported
 		default:
-			return nil, fmt.Errorf("native buildmode c-shared is currently supported only on linux, android, and windows")
+			return nil, fmt.Errorf("native buildmode c-shared is currently supported only on darwin, linux, android, and windows")
 		}
 		if config.GC() != "manual" {
 			return nil, fmt.Errorf("native buildmode c-shared currently requires -gc=manual")
@@ -115,6 +120,18 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 			return strings.HasPrefix(base, "task_stack_") && (strings.HasSuffix(base, ".S") || strings.HasSuffix(base, ".c"))
 		})
 		switch config.GOOS() {
+		case "darwin":
+			// A shared library must not install the executable's process-wide
+			// scheduler or fatal-signal hooks. Keep the Darwin futex support: the
+			// allocator mutex uses it even with scheduler=none.
+			config.Target.ExtraFiles = slices.DeleteFunc(config.Target.ExtraFiles, func(path string) bool {
+				switch path {
+				case "src/internal/task/task_threads.c", "src/runtime/runtime_unix.c", "src/runtime/signal.c":
+					return true
+				default:
+					return false
+				}
+			})
 		case "linux", "android":
 			// The Linux target normally includes its thread scheduler and signal
 			// support as C objects. They are not used with scheduler=none and leave

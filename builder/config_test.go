@@ -2,6 +2,7 @@ package builder
 
 import (
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -122,6 +123,60 @@ func TestManualCSharedConfigLinux(t *testing.T) {
 	}
 }
 
+func TestManualCSharedConfigDarwin(t *testing.T) {
+	config, err := NewConfig(&compileopts.Options{
+		GOOS:       "darwin",
+		GOARCH:     "arm64",
+		BuildMode:  "c-shared",
+		GC:         "manual",
+		ManualSize: 1024,
+		Scheduler:  "none",
+	})
+	if err != nil {
+		t.Fatalf("NewConfig() failed: %v", err)
+	}
+	if config.DefaultBinaryExtension() != ".dylib" {
+		t.Fatalf("darwin c-shared extension: got %q, want .dylib", config.DefaultBinaryExtension())
+	}
+	for _, forbidden := range []string{
+		"src/internal/task/task_threads.c",
+		"src/runtime/runtime_unix.c",
+		"src/runtime/signal.c",
+	} {
+		if slices.Contains(config.Target.ExtraFiles, forbidden) {
+			t.Errorf("darwin c-shared target includes %q", forbidden)
+		}
+	}
+	if !slices.Contains(config.Target.ExtraFiles, "src/internal/futex/futex_darwin.c") {
+		t.Errorf("darwin c-shared target should retain the futex implementation: %v", config.Target.ExtraFiles)
+	}
+}
+
+func TestManualCSharedConfigIOS(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("iOS target configuration requires Xcode")
+	}
+	for _, target := range []string{"ios-arm64", "ios-simulator-arm64"} {
+		t.Run(target, func(t *testing.T) {
+			config, err := NewConfig(&compileopts.Options{
+				Target:     target,
+				ManualSize: 1024,
+			})
+			if err != nil {
+				t.Fatalf("NewConfig() failed: %v", err)
+			}
+			wantFiles := []string{
+				"src/internal/futex/futex_darwin.c",
+				"src/runtime/os_darwin.c",
+				"src/runtime/asm_arm64.S",
+			}
+			if !slices.Equal(config.Target.ExtraFiles, wantFiles) {
+				t.Errorf("ExtraFiles = %v, want %v", config.Target.ExtraFiles, wantFiles)
+			}
+		})
+	}
+}
+
 func TestManualCSharedConfigWindows(t *testing.T) {
 	config, err := NewConfig(&compileopts.Options{
 		GOOS:       "windows",
@@ -231,5 +286,54 @@ func TestFilterWindowsCSharedLDFlags(t *testing.T) {
 	}
 	if !slices.Contains(got, "-m") || !slices.Contains(got, "i386pep") || !slices.Contains(got, "--gc-sections") {
 		t.Fatalf("filterWindowsCSharedLDFlags dropped required flags: %v", got)
+	}
+}
+
+func TestDarwinLinkerFlavor(t *testing.T) {
+	if got, want := addDarwinLinkerFlavor("ld.lld", []string{"-dylib"}), []string{"-flavor", "darwin", "-dylib"}; !slices.Equal(got, want) {
+		t.Fatalf("ld.lld flags = %v, want %v", got, want)
+	}
+	if got, want := addDarwinLinkerFlavor("ld", []string{"-dylib"}), []string{"-dylib"}; !slices.Equal(got, want) {
+		t.Fatalf("Apple ld flags = %v, want %v", got, want)
+	}
+}
+
+func TestDarwinLinkerOptimizationFlags(t *testing.T) {
+	config := &compileopts.Config{
+		Options: &compileopts.Options{},
+		Target: &compileopts.TargetSpec{
+			GOOS:      "darwin",
+			CPU:       "generic",
+			Features:  "+neon",
+			Linker:    "ld.lld",
+			CodeModel: "medium",
+		},
+	}
+	lldFlags := appendLinkerOptimizationFlags(nil, config, 2, 2, "/tmp/cache")
+	for _, want := range []string{
+		"--lto-O2",
+		"--thinlto-cache-dir=/tmp/cache/thinlto",
+		"-mcpu=generic",
+		"-mattr=+neon",
+		"-code-model=medium",
+		"--rotation-max-header-size=0",
+	} {
+		if !slices.Contains(lldFlags, want) {
+			t.Errorf("Darwin ld.lld flags missing %q: %v", want, lldFlags)
+		}
+	}
+	if slices.Contains(lldFlags, "-cache_path_lto") {
+		t.Errorf("Darwin ld.lld received Apple ld cache option: %v", lldFlags)
+	}
+
+	config.Target.Linker = "ld"
+	appleFlags := appendLinkerOptimizationFlags(nil, config, 2, 2, "/tmp/cache")
+	if !slices.Contains(appleFlags, "-cache_path_lto") || !slices.Contains(appleFlags, "/tmp/cache/thinlto") {
+		t.Errorf("Apple ld flags missing cache option: %v", appleFlags)
+	}
+	for _, forbidden := range []string{"--lto-O2", "-mcpu=generic", "-mattr=+neon", "-code-model=medium", "--rotation-max-header-size=0"} {
+		if slices.Contains(appleFlags, forbidden) {
+			t.Errorf("Apple ld received LLD flag %q: %v", forbidden, appleFlags)
+		}
 	}
 }

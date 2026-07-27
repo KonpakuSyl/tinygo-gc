@@ -55,17 +55,8 @@ type segmentLoadCommand struct {
 	flags    uint32
 }
 
-// MachO header of the currently running process.
-//
-//go:extern _mh_execute_header
-var libc_mh_execute_header machHeader
-
-// Find global variables in .data/.bss sections.
-// The MachO linker doesn't seem to provide symbols for the start and end of the
-// data section. There is get_etext, get_edata, and get_end, but these are
-// undocumented and don't work with ASLR (which is enabled by default).
-// Therefore, read the MachO header directly.
-func findGlobals(found func(start, end uintptr)) {
+// scanMachOGlobals finds writable Mach-O segments in module.
+func scanMachOGlobals(module *machHeader, found func(start, end uintptr)) {
 	// Here is a useful blog post to understand the MachO file format:
 	// https://h3adsh0tzz.com/2020/01/macho-file-format/
 
@@ -76,7 +67,7 @@ func findGlobals(found func(start, end uintptr)) {
 	)
 
 	// Sanity check that we're actually looking at a MachO header.
-	if gcAsserts && libc_mh_execute_header.magic != MH_MAGIC_64 {
+	if gcAsserts && module.magic != MH_MAGIC_64 {
 		runtimePanic("gc: unexpected MachO header")
 	}
 
@@ -85,14 +76,14 @@ func findGlobals(found func(start, end uintptr)) {
 	// pointer to that struct in advance.
 	var offset uintptr
 	var hasOffset bool
-	cmd := (*segmentLoadCommand)(unsafe.Pointer(uintptr(unsafe.Pointer(&libc_mh_execute_header)) + unsafe.Sizeof(machHeader{})))
-	for i := libc_mh_execute_header.ncmds; i != 0; i-- {
+	cmd := (*segmentLoadCommand)(unsafe.Pointer(uintptr(unsafe.Pointer(module)) + unsafe.Sizeof(machHeader{})))
+	for i := module.ncmds; i != 0; i-- {
 		if cmd.cmd == LC_SEGMENT_64 {
 			if cmd.fileoff == 0 && cmd.nsects != 0 {
 				// Detect ASLR offset by checking fileoff and nsects. This
 				// locates the __TEXT segment. This matches getsectiondata:
 				// https://opensource.apple.com/source/cctools/cctools-973.0.1/libmacho/getsecbyname.c.auto.html
-				offset = uintptr(unsafe.Pointer(&libc_mh_execute_header)) - cmd.vmaddr
+				offset = uintptr(unsafe.Pointer(module)) - cmd.vmaddr
 				hasOffset = true
 			}
 			if cmd.maxprot&VM_PROT_WRITE != 0 {

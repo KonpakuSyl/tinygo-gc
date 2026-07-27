@@ -22,6 +22,8 @@ func init() {
 	commands["ld.lld"] = []string{"ld.lld-" + llvmMajor, "ld.lld"}
 	commands["wasm-ld"] = []string{"wasm-ld-" + llvmMajor, "wasm-ld"}
 	commands["lldb"] = []string{"lldb-" + llvmMajor, "lldb"}
+	// Apple targets use the Xcode Mach-O linker.
+	commands["ld"] = []string{"ld"}
 	// Add the path to a Homebrew-installed LLVM for ease of use (no need to
 	// manually set $PATH).
 	if runtime.GOOS == "darwin" {
@@ -35,7 +37,7 @@ func init() {
 			// unknown GOARCH
 			panic(fmt.Sprintf("unknown GOARCH: %s on darwin", runtime.GOARCH))
 		}
-		commands["clang"] = append(commands["clang"], prefix+"clang-"+llvmMajor)
+		commands["clang"] = append(commands["clang"], prefix+"clang-"+llvmMajor, "/usr/bin/clang")
 		commands["ld.lld"] = append(commands["ld.lld"], prefix+"ld.lld")
 		commands["wasm-ld"] = append(commands["wasm-ld"], prefix+"wasm-ld")
 		commands["lldb"] = append(commands["lldb"], prefix+"lldb")

@@ -383,19 +383,18 @@ func findSystemClangResources(TINYGOROOT string) string {
 			return path
 		}
 	case "darwin":
-		// This assumes a Homebrew installation, like in builder/commands.go.
-		var prefix string
-		switch runtime.GOARCH {
-		case "amd64":
-			prefix = "/usr/local/opt/llvm@" + llvmMajor
-		case "arm64":
-			prefix = "/opt/homebrew/opt/llvm@" + llvmMajor
-		default:
-			return "" // very unlikely for now
+		// Xcode supplies the system Clang used for Darwin C and assembly
+		// compilation. The local LLVM build is used for TinyGo itself.
+		clangPath, err := exec.Command("xcrun", "--find", "clang").Output()
+		if err != nil {
+			return ""
 		}
-		path := fmt.Sprintf("%s/lib/clang/%s", prefix, llvmMajor)
-		_, err := os.Stat(path + "/include/stdint.h")
-		if err == nil {
+		resourceDir, err := exec.Command(strings.TrimSpace(string(clangPath)), "-print-resource-dir").Output()
+		if err != nil {
+			return ""
+		}
+		path := strings.TrimSpace(string(resourceDir))
+		if _, err := os.Stat(filepath.Join(path, "include", "stdint.h")); err == nil {
 			return path
 		}
 	}

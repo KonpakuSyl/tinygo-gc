@@ -1,0 +1,20 @@
+{
+  "llvm-target": "arm64-apple-ios13.0",
+  "cpu": "generic",
+  "features": "+ete,+fp-armv8,+neon,+trbe,+v8a",
+  "goos": "darwin",
+  "goarch": "arm64",
+  "build-tags": ["tinygo.ios"],
+  "buildmode": "c-shared",
+  "gc": "manual",
+  "scheduler": "none",
+  "linker": "ld",
+  "libc": "darwin-sdk",
+  "apple-target": "ios:13.0",
+  "ldflags": ["-dead_strip", "-arch", "arm64"],
+  "extra-files": [
+    "src/internal/futex/futex_darwin.c",
+    "src/runtime/os_darwin.c",
+    "src/runtime/asm_arm64.S"
+  ]
+}
