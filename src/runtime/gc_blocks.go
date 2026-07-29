@@ -425,7 +425,7 @@ func alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer {
 		gcTotalAlloc -= uint64(rawSize)
 		gcMallocs--
 		gcLock.Unlock()
-		panic(ErrManualHeapFull)
+		runtimePanicAt(returnAddress(0), "manual heap exhausted")
 	}
 	if pointer == nil {
 		var ranGC bool

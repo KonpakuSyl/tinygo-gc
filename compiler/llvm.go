@@ -129,7 +129,7 @@ func (b *builder) emitPointerPack(values []llvm.Value) llvm.Value {
 		// Packed data is bigger than a pointer, so allocate it on the heap.
 		sizeValue := llvm.ConstInt(b.uintptrType, size, false)
 		align := b.targetData.ABITypeAlignment(packedType)
-		packedAlloc := b.createRuntimeAlloc([]llvm.Value{
+		packedAlloc := b.createRuntimeCall("alloc", []llvm.Value{
 			sizeValue,
 			llvm.ConstNull(b.dataPtrType),
 		}, "")

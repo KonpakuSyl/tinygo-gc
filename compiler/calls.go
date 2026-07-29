@@ -71,16 +71,6 @@ func (b *builder) createRuntimeInvoke(fnName string, args []llvm.Value, name str
 	return b.createRuntimeCallCommon(fnName, args, name, true)
 }
 
-// createRuntimeAlloc creates a call to runtime.alloc. In manual GC mode an
-// exhausted fixed heap panics, so recoverable functions need a checkpoint
-// before the allocation. Other GC modes retain their ordinary direct call.
-func (b *builder) createRuntimeAlloc(args []llvm.Value, name string) llvm.Value {
-	if b.ManualGC {
-		return b.createRuntimeInvoke("alloc", args, name)
-	}
-	return b.createRuntimeCall("alloc", args, name)
-}
-
 // createCall creates a call to the given function with the arguments possibly
 // expanded.
 func (b *builder) createCall(fnType llvm.Type, fn llvm.Value, args []llvm.Value, name string) llvm.Value {

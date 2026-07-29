@@ -2,6 +2,8 @@
 
 package runtime
 
+import "unsafe"
+
 const manualHeapMode = true
 
 // manualHeapSize is populated by the build driver after package compilation.
@@ -24,4 +26,25 @@ func manualHeapSizeValue() uintptr {
 		runtimePanic("manual heap size is zero")
 	}
 	return size
+}
+
+// ManualHeapFree returns the total number of free bytes and the largest single
+// allocation payload supported by the manual heap. The total includes all free
+// blocks, while the largest value accounts for fragmentation and the object
+// header added to each allocation.
+func ManualHeapFree() (total, largest uintptr) {
+	gcLock.Lock()
+	headerSize := align(unsafe.Sizeof(objHeader{}))
+	for freeRange := freeRanges; freeRange != nil; freeRange = freeRange.nextLen {
+		rangeSize := freeRange.len * bytesPerBlock
+		total += rangeSize
+		if rangeSize > headerSize && rangeSize-headerSize > largest {
+			largest = rangeSize - headerSize
+		}
+		for more := freeRange.nextWithLen; more != nil; more = more.next {
+			total += rangeSize
+		}
+	}
+	gcLock.Unlock()
+	return total, largest
 }

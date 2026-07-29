@@ -187,6 +187,66 @@ func TestNativeCSharedExport(t *testing.T) {
 	})
 }
 
+func TestManualGCAllocationDoesNotUseRecoverCheckpoint(t *testing.T) {
+	options := &compileopts.Options{
+		Target:     "linux-amd64-gnu",
+		GC:         "manual",
+		ManualSize: 1024,
+	}
+	mod, errs := testCompilePackage(t, options, "manual.go")
+	defer mod.Dispose()
+	if errs != nil {
+		for _, err := range errs {
+			t.Error(err)
+		}
+		return
+	}
+	if err := llvm.VerifyModule(mod, llvm.PrintMessageAction); err != nil {
+		t.Fatal(err)
+	}
+
+	ir := mod.String()
+	start := strings.Index(ir, "define hidden void @main.manualGCDeferAlloc")
+	if start == -1 {
+		t.Fatalf("manual GC test function missing from IR:\n%s", ir)
+	}
+	body := ir[start:]
+	if end := strings.Index(body, "\n}"); end != -1 {
+		body = body[:end]
+	}
+	alloc := strings.Index(body, "@runtime.alloc")
+	if alloc == -1 {
+		t.Fatalf("manual GC allocation missing from IR:\n%s", body)
+	}
+	if strings.Contains(body[:alloc], "setjmp") {
+		t.Fatalf("manual GC allocation must not have a recover checkpoint:\n%s", body)
+	}
+	if !strings.Contains(ir, "@runtime.ManualHeapFree") {
+		t.Fatalf("manual heap query missing from IR:\n%s", ir)
+	}
+}
+
+func TestManualHeapFreeAvailableWithoutManualGC(t *testing.T) {
+	options := &compileopts.Options{
+		Target: "linux-amd64-gnu",
+		GC:     "precise",
+	}
+	mod, errs := testCompilePackage(t, options, "manual.go")
+	defer mod.Dispose()
+	if errs != nil {
+		for _, err := range errs {
+			t.Error(err)
+		}
+		return
+	}
+	if err := llvm.VerifyModule(mod, llvm.PrintMessageAction); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(mod.String(), "@runtime.ManualHeapFree") {
+		t.Fatal("manual heap query missing from non-manual IR")
+	}
+}
+
 // fuzzyEqualIR returns true if the two LLVM IR strings passed in are roughly
 // equal. That means, only relevant lines are compared (excluding comments
 // etc.).
@@ -295,7 +355,6 @@ func testCompilePackage(t *testing.T, options *compileopts.Options, file string)
 		AutomaticStackSize: config.AutomaticStackSize(),
 		DefaultStackSize:   config.StackSize(),
 		NeedsStackObjects:  config.NeedsStackObjects(),
-		ManualGC:           config.GC() == "manual",
 	}
 	machine, err := NewTargetMachine(compilerConfig)
 	if err != nil {

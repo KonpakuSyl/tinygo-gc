@@ -10,3 +10,8 @@ func manualHeapSizeValue() uintptr {
 
 func configureManualHeap() {
 }
+
+// ManualHeapFree returns zero values when the manual collector is not in use.
+func ManualHeapFree() (total, largest uintptr) {
+	return 0, 0
+}
