@@ -6,7 +6,11 @@ set -eu
 # and never invoke Zig.
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-zig=${TINYGO_ZIG:-"$root/.local/zig/zig"}
+zig_command=${TINYGO_ZIG:-zig}
+if ! zig=$(command -v "$zig_command"); then
+	printf 'Zig not found in PATH: %s; install zig or set TINYGO_ZIG\n' "$zig_command" >&2
+	exit 1
+fi
 out="$root/lib/sysroots/linux-amd64-gnu"
 target=x86_64-linux-gnu.2.25
 cache=$(mktemp -d "${TMPDIR:-/tmp}/tinygo-glibc-cache.XXXXXX")
@@ -16,10 +20,6 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-if [ ! -x "$zig" ]; then
-	printf 'Zig not found at %s; set TINYGO_ZIG to its executable path\n' "$zig" >&2
-	exit 1
-fi
 case "$zig" in
 	/*) ;;
 	*) zig=$(CDPATH= cd -- "$(dirname -- "$zig")" && pwd)/$(basename -- "$zig") ;;
@@ -63,8 +63,10 @@ for source in \
 	src/runtime/runtime_unix.c \
 	src/runtime/signal.c
 do
+	# 构建开启优化后会激活 bits/stdio.h 等 glibc 条件包含，依赖扫描也必须
+	# 开启优化，才能将优化 C 编译所需的完整头文件闭包复制到 sysroot。
 	# shellcheck disable=SC2086
-	"$zig" cc -target "$target" $header_flags -D_GNU_SOURCE -D_XOPEN_SOURCE \
+	"$zig" cc -target "$target" $header_flags -O2 -D_GNU_SOURCE -D_XOPEN_SOURCE \
 		-M "$root/$source" >>"$headers"
 done
 
