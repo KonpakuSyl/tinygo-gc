@@ -57,6 +57,7 @@ type Config struct {
 	DefaultStackSize   uint64
 	MaxStackAlloc      uint64
 	NeedsStackObjects  bool
+	Regions            bool
 	Debug              bool // Whether to emit debug information in the LLVM module.
 	Nobounds           bool // Whether to skip bounds checks
 	PanicStrategy      string
@@ -92,20 +93,22 @@ type compilerContext struct {
 	pkg              *types.Package
 	packageDir       string // directory for this package
 	runtimePkg       *types.Package
+	regionDoClosures map[*ssa.Function]bool
 }
 
 // newCompilerContext returns a new compiler context ready for use, most
 // importantly with a newly created LLVM context and module.
 func newCompilerContext(moduleName string, machine llvm.TargetMachine, config *Config, dumpSSA bool) *compilerContext {
 	c := &compilerContext{
-		Config:        config,
-		DumpSSA:       dumpSSA,
-		difiles:       make(map[string]llvm.Metadata),
-		ditypes:       make(map[types.Type]llvm.Metadata),
-		machine:       machine,
-		targetData:    machine.CreateTargetData(),
-		functionInfos: map[*ssa.Function]functionInfo{},
-		astComments:   map[string]*ast.CommentGroup{},
+		Config:           config,
+		DumpSSA:          dumpSSA,
+		difiles:          make(map[string]llvm.Metadata),
+		ditypes:          make(map[types.Type]llvm.Metadata),
+		machine:          machine,
+		targetData:       machine.CreateTargetData(),
+		functionInfos:    map[*ssa.Function]functionInfo{},
+		astComments:      map[string]*ast.CommentGroup{},
+		regionDoClosures: map[*ssa.Function]bool{},
 	}
 
 	c.ctx = llvm.NewContext()
@@ -148,47 +151,55 @@ func (c *compilerContext) dispose() {
 type builder struct {
 	*compilerContext
 	llvm.Builder
-	fn                *ssa.Function
-	llvmFnType        llvm.Type
-	llvmFn            llvm.Value
-	info              functionInfo
-	locals            map[ssa.Value]llvm.Value // local variables
-	blockInfo         []blockInfo
-	currentBlock      *ssa.BasicBlock
-	currentBlockInfo  *blockInfo
-	tarjanStack       []uint
-	tarjanIndex       uint
-	phis              []phiNode
-	deferPtr          llvm.Value
-	deferFrame        llvm.Value
-	stackChainAlloca  llvm.Value
-	landingpad        llvm.BasicBlock
-	difunc            llvm.Metadata
-	dilocals          map[*types.Var]llvm.Metadata
-	initInlinedAt     llvm.Metadata            // fake inlinedAt position
-	initPseudoFuncs   map[string]llvm.Metadata // fake "inlined" functions for proper init debug locations
-	allDeferFuncs     []interface{}
-	deferFuncs        map[*ssa.Function]int
-	deferInvokeFuncs  map[string]int
-	deferClosureFuncs map[*ssa.Function]int
-	deferExprFuncs    map[ssa.Value]int
-	selectRecvBuf     map[*ssa.Select]llvm.Value
-	deferBuiltinFuncs map[ssa.Value]deferBuiltin
-	runDefersBlock    []llvm.BasicBlock
-	afterDefersBlock  []llvm.BasicBlock
+	fn                      *ssa.Function
+	llvmFnType              llvm.Type
+	llvmFn                  llvm.Value
+	info                    functionInfo
+	locals                  map[ssa.Value]llvm.Value // local variables
+	blockInfo               []blockInfo
+	currentBlock            *ssa.BasicBlock
+	currentBlockInfo        *blockInfo
+	tarjanStack             []uint
+	tarjanIndex             uint
+	phis                    []phiNode
+	deferPtr                llvm.Value
+	deferFrame              llvm.Value
+	regionDeferRecord       llvm.Value
+	stackChainAlloca        llvm.Value
+	regionAlloca            llvm.Value
+	regionOwnerParam        llvm.Value                  // hidden regions owner passed by an internal caller
+	blockRegionAlloca       llvm.Value                  // short-lived owner for a proven local SSA block
+	regionManualValueOwners map[ssa.Value]llvm.Value    // captured slice/string storage -> explicit Region
+	regionConvertOwners     map[*ssa.Convert]llvm.Value // short-lived source buffer -> temporary Region
+	landingpad              llvm.BasicBlock
+	difunc                  llvm.Metadata
+	dilocals                map[*types.Var]llvm.Metadata
+	initInlinedAt           llvm.Metadata            // fake inlinedAt position
+	initPseudoFuncs         map[string]llvm.Metadata // fake "inlined" functions for proper init debug locations
+	allDeferFuncs           []interface{}
+	deferFuncs              map[*ssa.Function]int
+	deferInvokeFuncs        map[string]int
+	deferClosureFuncs       map[*ssa.Function]int
+	deferExprFuncs          map[ssa.Value]int
+	selectRecvBuf           map[*ssa.Select]llvm.Value
+	deferBuiltinFuncs       map[ssa.Value]deferBuiltin
+	runDefersBlock          []llvm.BasicBlock
+	afterDefersBlock        []llvm.BasicBlock
 }
 
 func newBuilder(c *compilerContext, irbuilder llvm.Builder, f *ssa.Function) *builder {
 	fnType, fn := c.getFunction(f)
 	return &builder{
-		compilerContext: c,
-		Builder:         irbuilder,
-		fn:              f,
-		llvmFnType:      fnType,
-		llvmFn:          fn,
-		info:            c.getFunctionInfo(f),
-		locals:          make(map[ssa.Value]llvm.Value),
-		dilocals:        make(map[*types.Var]llvm.Metadata),
+		compilerContext:         c,
+		Builder:                 irbuilder,
+		fn:                      f,
+		llvmFnType:              fnType,
+		llvmFn:                  fn,
+		info:                    c.getFunctionInfo(f),
+		locals:                  make(map[ssa.Value]llvm.Value),
+		dilocals:                make(map[*types.Var]llvm.Metadata),
+		regionManualValueOwners: make(map[ssa.Value]llvm.Value),
+		regionConvertOwners:     make(map[*ssa.Convert]llvm.Value),
 	}
 }
 
@@ -314,9 +325,12 @@ func CompilePackage(moduleName string, pkg *loader.Package, ssaPkg *ssa.Package,
 	// Load comments such as //go:extern on globals.
 	c.loadASTComments(pkg)
 
-	// Predeclare the runtime.alloc function, which is used by the wordpack
-	// functionality.
-	c.getFunction(c.program.ImportedPackage("runtime").Members["alloc"].(*ssa.Function))
+	// Predeclare the allocator used by packed closure/interface data.
+	allocator := "alloc"
+	if c.Regions {
+		allocator = "regionAlloc"
+	}
+	c.getFunction(c.program.ImportedPackage("runtime").Members[allocator].(*ssa.Function))
 	if c.NeedsStackObjects {
 		// Predeclare trackPointer, which is used everywhere we use runtime.alloc.
 		c.getFunction(c.program.ImportedPackage("runtime").Members["trackPointer"].(*ssa.Function))
@@ -1310,6 +1324,14 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		}
 	}
 
+	// The hidden owner is part of the regions-only internal Go ABI. It is kept
+	// immediately before the normal closure context so exported and runtime
+	// entry points retain their existing ABI.
+	if b.hasRegionOwnerABI(b.fn) {
+		b.regionOwnerParam = b.llvmFn.Param(b.llvmFn.ParamsCount() - 2)
+		b.regionOwnerParam.SetName("owner")
+	}
+
 	// Load free variables from the context. This is a closure (or bound
 	// method).
 	var context llvm.Value
@@ -1333,17 +1355,48 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 		}
 	}
 
-	if b.fn.Recover != nil {
-		// This function has deferred function calls. Set some things up for
-		// them.
-		b.deferInitFunc()
-	}
-
 	if b.NeedsStackObjects {
 		// Create a dummy alloca that will be used in runtime.trackPointer.
 		// It is necessary to pass a dummy alloca to runtime.trackPointer
 		// because runtime.trackPointer is replaced by an alloca store.
 		b.stackChainAlloca = b.CreateAlloca(b.ctx.Int8Type(), "stackalloc")
+	}
+
+	// Native c-shared exports execute on arbitrary host threads. Bind that
+	// thread before entering the compiler-managed function region so its owner
+	// is task-local instead of falling back to the runtime system owner.
+	if b.isNativeCSharedExport() && b.fn.Pkg.Pkg.Path() != "runtime" {
+		stackTop := b.CreatePtrToInt(b.readStackPointer(), b.uintptrType, "")
+		b.createRuntimeCall("cSharedInit", []llvm.Value{stackTop}, "")
+		if b.Scheduler == "threads" {
+			b.createRuntimeCall("cSharedTaskEnter", nil, "")
+		}
+	}
+
+	// Functions that return a Go reference allocate in their caller's region.
+	// This lets a returned map/slice/pointer stay valid through an arbitrary
+	// synchronous return chain without falling back to the task/root region.
+	if b.Regions && b.fn.Pkg != nil && b.fn.Pkg.Pkg.Path() != "runtime" && b.fn.Pkg.Pkg.Path() != "internal/task" && !b.regionDoClosures[b.fn] && !b.functionBorrowsCallerRegion() && b.functionNeedsRegion() {
+		regionType := b.getLLVMRuntimeType("region")
+		b.regionAlloca = b.CreateAlloca(regionType, "region")
+		// The hidden owner selects where borrowed allocations belong. It is not
+		// necessarily active (an explicit Region can be passed after Do), so an
+		// automatic region must always nest under the ambient runtime owner.
+		b.createRuntimeCall("regionEnter", []llvm.Value{b.regionAlloca}, "")
+	}
+	if b.Regions && b.regionsStrictPackage() && b.info.exported {
+		for i := 0; i < b.fn.Signature.Results().Len(); i++ {
+			result := b.fn.Signature.Results().At(i)
+			if typeContainsReference(result.Type()) {
+				b.addError(result.Pos(), "gc=regions does not permit exporting Go reference results")
+			}
+		}
+	}
+
+	if b.fn.Recover != nil {
+		// This function has deferred function calls. Set some things up for
+		// them after entering its region so panics can unwind to this frame.
+		b.deferInitFunc()
 	}
 }
 
@@ -1352,12 +1405,6 @@ func (b *builder) createFunctionStart(intrinsic bool) {
 // diagnostic.
 func (b *builder) createFunction() {
 	b.createFunctionStart(false)
-	if b.isNativeCSharedExport() && b.fn.Pkg.Pkg.Path() != "runtime" {
-		b.currentBlock = b.fn.Blocks[0]
-		b.currentBlockInfo = &b.blockInfo[0]
-		stackTop := b.CreatePtrToInt(b.readStackPointer(), b.uintptrType, "")
-		b.createRuntimeCall("cSharedInit", []llvm.Value{stackTop}, "")
-	}
 
 	// Fill blocks with instructions.
 	for _, block := range b.fn.DomPreorder() {
@@ -1367,6 +1414,11 @@ func (b *builder) createFunction() {
 		b.currentBlock = block
 		b.currentBlockInfo = &b.blockInfo[block.Index]
 		b.SetInsertPointAtEnd(b.currentBlockInfo.entry)
+		if b.regionBlockCanUseRegion(block) {
+			regionType := b.getLLVMRuntimeType("region")
+			b.blockRegionAlloca = llvmutil.CreateEntryBlockAlloca(b.Builder, regionType, "region.block")
+			b.createRuntimeCall("regionEnter", []llvm.Value{b.blockRegionAlloca}, "")
+		}
 		for _, instr := range block.Instrs {
 			if instr, ok := instr.(*ssa.DebugRef); ok {
 				if !b.Debug {
@@ -1399,7 +1451,15 @@ func (b *builder) createFunction() {
 					fmt.Printf("\t%s\n", instr.String())
 				}
 			}
+			if !b.blockRegionAlloca.IsNil() && regionBlockTerminator(instr) {
+				b.createRuntimeCall("regionExit", []llvm.Value{b.blockRegionAlloca}, "")
+				b.blockRegionAlloca = llvm.Value{}
+			}
 			b.createInstruction(instr)
+		}
+		if !b.blockRegionAlloca.IsNil() {
+			b.createRuntimeCall("regionExit", []llvm.Value{b.blockRegionAlloca}, "")
+			b.blockRegionAlloca = llvm.Value{}
 		}
 		if b.fn.Name() == "init" && len(block.Instrs) == 0 {
 			b.CreateRetVoid()
@@ -1542,6 +1602,12 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 	case *ssa.Defer:
 		b.createDefer(instr)
 	case *ssa.Go:
+		if b.Regions && b.regionsStrictPackage() {
+			if err := b.validateRegionsGo(instr); err != nil {
+				b.addError(instr.Pos(), err.Error())
+				break
+			}
+		}
 		// Start a new goroutine.
 		b.createGo(instr)
 	case *ssa.If:
@@ -1566,6 +1632,15 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 	case *ssa.Return:
 		if b.hasDeferFrame() {
 			b.createRuntimeCall("destroyDeferFrame", []llvm.Value{b.deferFrame}, "")
+		}
+		if !b.regionDeferRecord.IsNil() {
+			b.createRuntimeCall("regionUnregisterDefer", []llvm.Value{b.regionDeferRecord}, "")
+		}
+		if !b.regionAlloca.IsNil() {
+			b.createRuntimeCall("regionExit", []llvm.Value{b.regionAlloca}, "")
+		}
+		if b.isNativeCSharedExport() && b.fn.Pkg.Pkg.Path() != "runtime" && b.Scheduler == "threads" {
+			b.createRuntimeCall("cSharedTaskExit", nil, "")
 		}
 		if len(instr.Results) == 0 {
 			b.CreateRetVoid()
@@ -1592,6 +1667,9 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 	case *ssa.Send:
 		b.createChanSend(instr)
 	case *ssa.Store:
+		if b.Regions && b.regionsStrictPackage() && typeContainsReference(instr.Val.Type()) && regionStoreIsGlobal(instr.Addr) {
+			b.addError(instr.Pos(), "gc=regions does not permit storing Go references in globals; use a manually managed regions.Region owned by external code instead")
+		}
 		llvmAddr := b.getValue(instr.Addr, getPos(instr))
 		llvmVal := b.getValue(instr.Val, getPos(instr))
 		b.createNilCheck(instr.Addr, llvmAddr, "store")
@@ -1608,6 +1686,10 @@ func (b *builder) createInstruction(instr ssa.Instruction) {
 // createBuiltin lowers a builtin Go function (append, close, delete, etc.) to
 // LLVM IR. It uses runtime calls for some builtins.
 func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, callName string, pos token.Pos) (llvm.Value, error) {
+	return b.createBuiltinWithOwner(argTypes, argValues, callName, pos, llvm.Value{})
+}
+
+func (b *builder) createBuiltinWithOwner(argTypes []types.Type, argValues []llvm.Value, callName string, pos token.Pos, owner llvm.Value) (llvm.Value, error) {
 	switch callName {
 	case "append":
 		src := argValues[0]
@@ -1620,7 +1702,16 @@ func (b *builder) createBuiltin(argTypes []types.Type, argValues []llvm.Value, c
 		elemType := b.getLLVMType(argTypes[0].Underlying().(*types.Slice).Elem())
 		elemSize := llvm.ConstInt(b.uintptrType, b.targetData.TypeAllocSize(elemType), false)
 		elemLayout := b.createObjectLayout(elemType, pos)
-		result := b.createRuntimeCall("sliceAppend", []llvm.Value{srcBuf, elemsBuf, srcLen, srcCap, elemsLen, elemSize, elemLayout}, "append.new")
+		appendArgs := []llvm.Value{srcBuf, elemsBuf, srcLen, srcCap, elemsLen, elemSize, elemLayout}
+		appendFn := "sliceAppend"
+		if b.Regions {
+			appendFn = "sliceAppendRegions"
+			if owner.IsNil() {
+				owner = b.regionOwner()
+			}
+			appendArgs = append([]llvm.Value{owner}, appendArgs...)
+		}
+		result := b.createRuntimeCall(appendFn, appendArgs, "append.new")
 		newPtr := b.CreateExtractValue(result, 0, "append.newPtr")
 		newLen := b.CreateExtractValue(result, 1, "append.newLen")
 		newCap := b.CreateExtractValue(result, 2, "append.newCap")
@@ -2020,6 +2111,8 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 			return llvm.ConstInt(b.ctx.Int8Type(), panicStrategy, false), nil
 		case name == "runtime/interrupt.New":
 			return b.createInterruptGlobal(instr)
+		case name == "regions.Do" && b.Regions:
+			return b.createRegionsDo(instr)
 		case name == "runtime.exportedFuncPtr":
 			_, ptr := b.getFunction(instr.Args[0].(*ssa.Function))
 			return b.CreatePtrToInt(ptr, b.uintptrType, ""), nil
@@ -2043,6 +2136,13 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 	var calleeType llvm.Type
 	exported := false
 	if fn := instr.StaticCallee(); fn != nil {
+		if b.Regions && b.regionsStrictPackage() && fn.Blocks == nil && fn.Pkg != nil && fn.Pkg.Pkg.Path() != "regions" {
+			for _, arg := range instr.Args {
+				if isManualRegionHandle(arg.Type()) {
+					return llvm.Value{}, b.makeError(instr.Pos(), "gc=regions does not permit passing a regions.Region handle to FFI")
+				}
+			}
+		}
 		calleeType, callee = b.getFunction(fn)
 		info := b.getFunctionInfo(fn)
 		if callee.IsNil() {
@@ -2074,8 +2174,18 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 		for _, arg := range instr.Args {
 			argTypes = append(argTypes, arg.Type())
 		}
+		if b.Regions && call.Name() == "append" {
+			owner, err := b.regionTargetOwner(instr.Args[0], instr.Pos())
+			if err != nil {
+				return llvm.Value{}, err
+			}
+			return b.createBuiltinWithOwner(argTypes, params, call.Name(), instr.Pos(), owner)
+		}
 		return b.createBuiltin(argTypes, params, call.Name(), instr.Pos())
 	} else if instr.IsInvoke() {
+		if b.Regions && b.regionsStrictPackage() && !b.regionInterfaceInvokeAllowed(instr) {
+			return llvm.Value{}, b.makeError(instr.Pos(), "gc=regions does not permit unresolved interface calls")
+		}
 		// Interface method call (aka invoke call).
 		itf := b.getValue(instr.Value, getPos(instr)) // interface value (runtime._interface)
 		typecode := b.CreateExtractValue(itf, 0, "invoke.func.typecode")
@@ -2085,8 +2195,17 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 		params = append(params, typecode)
 		callee = b.getInvokeFunction(instr)
 		calleeType = callee.GlobalValueType()
-		context = llvm.Undef(b.dataPtrType)
+		// Interface invoke thunks use their final context slot to carry the
+		// regions owner to a concrete user method. Standard methods ignore it.
+		if b.Regions {
+			context = b.regionOwner()
+		} else {
+			context = llvm.Undef(b.dataPtrType)
+		}
 	} else {
+		if b.Regions && b.regionsStrictPackage() {
+			return llvm.Value{}, b.makeError(instr.Pos(), "gc=regions does not permit indirect Go function calls")
+		}
 		// Function pointer.
 		value := b.getValue(instr.Value, getPos(instr))
 		// This is a func value, which cannot be called directly. We have to
@@ -2097,6 +2216,17 @@ func (b *builder) createFunctionCall(instr *ssa.CallCommon) (llvm.Value, error) 
 	}
 
 	if !exported {
+		if fn := instr.StaticCallee(); fn != nil && b.hasRegionOwnerABI(fn) {
+			owner := b.regionOwner()
+			explicitOwner, found, err := b.regionExplicitOwnerForArgs(instr.Args, instr.Pos())
+			if err != nil {
+				return llvm.Value{}, err
+			}
+			if found {
+				owner = explicitOwner
+			}
+			params = append(params, owner)
+		}
 		// This function takes a context parameter.
 		// Add it to the end of the parameter list.
 		params = append(params, context)
@@ -2122,6 +2252,13 @@ func (b *builder) getValue(expr ssa.Value, pos token.Pos) llvm.Value {
 	case *ssa.Function:
 		if b.getFunctionInfo(expr).exported {
 			b.addError(expr.Pos(), "cannot use an exported function as value: "+expr.String())
+			return llvm.Undef(b.getLLVMType(expr.Type()))
+		}
+		if b.Regions && b.regionsStrictPackage() && b.hasRegionOwnerABI(expr) {
+			// A function value has only {context, function pointer}. It cannot
+			// carry the extra owner expected by this private ABI, so reject it
+			// instead of allowing an indirect call with too few arguments.
+			b.addError(expr.Pos(), "gc=regions cannot use an internal owner-ABI function as a func value")
 			return llvm.Undef(b.getLLVMType(expr.Type()))
 		}
 		_, fn := b.getFunction(expr)
@@ -2182,6 +2319,12 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 	case *ssa.Alloc:
 		typ := b.getLLVMType(expr.Type().Underlying().(*types.Pointer).Elem())
 		size := b.targetData.TypeAllocSize(typ)
+		if b.Regions && expr.Heap && size == 0 {
+			// Heap-allocated zero-sized Go values only need a stable non-nil
+			// address. Reusing the regions static sentinel is permitted and
+			// avoids creating a region allocation for make([]T, 0)/new(struct{}).
+			return b.regionZeroSizedPointer(), nil
+		}
 		// Move all "large" allocations to the heap.
 		if expr.Heap || size > b.MaxStackAlloc {
 			// Calculate ^uintptr(0)
@@ -2192,7 +2335,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 			}
 			sizeValue := llvm.ConstInt(b.uintptrType, size, false)
 			layoutValue := b.createObjectLayout(typ, expr.Pos())
-			buf := b.createRuntimeCall("alloc", []llvm.Value{sizeValue, layoutValue}, expr.Comment)
+			buf := b.createManagedAlloc(sizeValue, layoutValue, expr.Comment)
 			align := b.targetData.ABITypeAlignment(typ)
 			buf.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(align)))
 			return buf, nil
@@ -2206,9 +2349,29 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 	case *ssa.BinOp:
 		x := b.getValue(expr.X, getPos(expr))
 		y := b.getValue(expr.Y, getPos(expr))
+		if b.Regions && expr.Op == token.ADD && typeIsString(expr.X.Type()) {
+			owner, err := b.regionTargetOwner(expr.X, expr.Pos())
+			if err != nil {
+				return llvm.Value{}, err
+			}
+			return b.createRuntimeCall("stringConcatRegions", []llvm.Value{owner, x, y}, ""), nil
+		}
 		return b.createBinOp(expr.Op, expr.X.Type(), expr.Y.Type(), x, y, expr.Pos())
 	case *ssa.Call:
-		return b.createFunctionCall(expr.Common())
+		result, err := b.createFunctionCall(expr.Common())
+		if err != nil || !b.Regions || !isSliceOrString(expr.Type()) {
+			return result, err
+		}
+		if fn := expr.Common().StaticCallee(); fn != nil && b.hasRegionOwnerABI(fn) {
+			owner, found, ownerErr := b.regionExplicitOwnerForArgs(expr.Common().Args, expr.Pos())
+			if ownerErr != nil {
+				return llvm.Value{}, ownerErr
+			}
+			if found {
+				b.regionManualValueOwners[expr] = owner
+			}
+		}
+		return result, nil
 	case *ssa.ChangeInterface:
 		// Do not change between interface types: always use the underlying
 		// (concrete) type in the type number of the interface. Every method
@@ -2247,7 +2410,14 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		panic("const is not an expression")
 	case *ssa.Convert:
 		x := b.getValue(expr.X, getPos(expr))
-		return b.createConvert(expr.X.Type(), expr.Type(), x, expr.Pos())
+		unsafeAllowed := false
+		if b.Regions && b.regionsStrictPackage() && isPointer(expr.X.Type().Underlying()) && isUintptrType(expr.Type()) {
+			unsafeAllowed = b.regionUnsafePointerToUintptrAllowed(expr)
+			if !unsafeAllowed {
+				return llvm.Value{}, b.makeError(expr.Pos(), "gc=regions does not permit unsafe.Pointer/uintptr lifetime conversions")
+			}
+		}
+		return b.createConvertWithSource(expr.X.Type(), expr.Type(), x, expr, expr.X, expr.Pos(), unsafeAllowed)
 	case *ssa.Extract:
 		if _, ok := expr.Tuple.(*ssa.Select); ok {
 			return b.getChanSelectResult(expr), nil
@@ -2399,6 +2569,13 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		sliceLen := b.getValue(expr.Len, getPos(expr))
 		sliceCap := b.getValue(expr.Cap, getPos(expr))
 		sliceType := expr.Type().Underlying().(*types.Slice)
+		if b.Regions && regionZeroSlice(expr) {
+			zeroSlice := llvm.Undef(b.getLLVMType(expr.Type()))
+			zeroSlice = b.CreateInsertValue(zeroSlice, b.regionZeroSizedPointer(), 0, "")
+			zeroSlice = b.CreateInsertValue(zeroSlice, llvm.ConstInt(b.uintptrType, 0, false), 1, "")
+			zeroSlice = b.CreateInsertValue(zeroSlice, llvm.ConstInt(b.uintptrType, 0, false), 2, "")
+			return zeroSlice, nil
+		}
 		llvmElemType := b.getLLVMType(sliceType.Elem())
 		elemSize := b.targetData.TypeAllocSize(llvmElemType)
 		elemAlign := b.targetData.ABITypeAlignment(llvmElemType)
@@ -2424,7 +2601,7 @@ func (b *builder) createExpr(expr ssa.Value) (llvm.Value, error) {
 		}
 		sliceSize := b.CreateBinOp(llvm.Mul, elemSizeValue, sliceCapCast, "makeslice.cap")
 		layoutValue := b.createObjectLayout(llvmElemType, expr.Pos())
-		slicePtr := b.createRuntimeCall("alloc", []llvm.Value{sliceSize, layoutValue}, "makeslice.buf")
+		slicePtr := b.createManagedAlloc(sliceSize, layoutValue, "makeslice.buf")
 		slicePtr.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(elemAlign)))
 
 		// Extend or truncate if necessary. This is safe as we've already done
@@ -2921,6 +3098,9 @@ func (b *builder) createBinOp(op token.Token, typ, ytyp types.Type, x, y llvm.Va
 			// Operations on strings
 			switch op {
 			case token.ADD: // +
+				if b.Regions {
+					return b.createRuntimeCall("stringConcatRegions", []llvm.Value{b.regionOwner(), x, y}, ""), nil
+				}
 				return b.createRuntimeCall("stringConcat", []llvm.Value{x, y}, ""), nil
 			case token.EQL: // ==
 				return b.createRuntimeCall("stringEqual", []llvm.Value{x, y}, ""), nil
@@ -3201,12 +3381,39 @@ func (c *compilerContext) createConst(expr *ssa.Const, pos token.Pos) llvm.Value
 
 // createConvert creates a Go type conversion instruction.
 func (b *builder) createConvert(typeFrom, typeTo types.Type, value llvm.Value, pos token.Pos) (llvm.Value, error) {
+	return b.createConvertWithSource(typeFrom, typeTo, value, nil, nil, pos, false)
+}
+
+// createConvertWithUnsafe is createConvert with the one regions-only escape
+// hatch used after an SSA conversion has been proved to end in synchronous FFI.
+func (b *builder) createConvertWithUnsafe(typeFrom, typeTo types.Type, value llvm.Value, pos token.Pos, unsafeAllowed bool) (llvm.Value, error) {
+	return b.createConvertWithSource(typeFrom, typeTo, value, nil, nil, pos, unsafeAllowed)
+}
+
+// createConvertWithSource keeps the SSA source for conversions that allocate.
+// In gc=regions, this lets a string/slice conversion preserve a manual owner
+// rather than falling back to the task-local ambient owner.
+func (b *builder) createConvertWithSource(typeFrom, typeTo types.Type, value llvm.Value, target *ssa.Convert, source ssa.Value, pos token.Pos, unsafeAllowed bool) (llvm.Value, error) {
+	regionOwner := func() (llvm.Value, error) {
+		if target != nil {
+			if owner := b.regionTemporaryConvertOwner(target); !owner.IsNil() {
+				return owner, nil
+			}
+		}
+		if source != nil {
+			return b.regionTargetOwner(source, pos)
+		}
+		return b.regionOwner(), nil
+	}
 	llvmTypeFrom := value.Type()
 	llvmTypeTo := b.getLLVMType(typeTo)
 
 	// Conversion between unsafe.Pointer and uintptr.
 	isPtrFrom := isPointer(typeFrom.Underlying())
 	isPtrTo := isPointer(typeTo.Underlying())
+	if b.Regions && b.regionsStrictPackage() && ((isPtrFrom && isUintptrType(typeTo) && !unsafeAllowed) || (isUintptrType(typeFrom) && isPtrTo)) {
+		return llvm.Value{}, b.makeError(pos, "gc=regions does not permit unsafe.Pointer/uintptr lifetime conversions")
+	}
 	if isPtrFrom && !isPtrTo {
 		return b.CreatePtrToInt(value, llvmTypeTo, ""), nil
 	} else if !isPtrFrom && isPtrTo {
@@ -3236,12 +3443,37 @@ func (b *builder) createConvert(typeFrom, typeTo types.Type, value llvm.Value, p
 				} else if sizeFrom < 4 {
 					value = b.CreateSExt(value, b.ctx.Int32Type(), "")
 				}
+				if b.Regions {
+					owner, err := regionOwner()
+					if err != nil {
+						return llvm.Value{}, err
+					}
+					return b.createRuntimeCall("stringFromUnicodeRegions", []llvm.Value{owner, value}, ""), nil
+				}
 				return b.createRuntimeCall("stringFromUnicode", []llvm.Value{value}, ""), nil
 			case *types.Slice:
 				switch typeFrom.Elem().(*types.Basic).Kind() {
 				case types.Byte:
+					if b.Regions {
+						owner, err := regionOwner()
+						if err != nil {
+							return llvm.Value{}, err
+						}
+						result := b.createRuntimeCall("stringFromBytesRegions", []llvm.Value{owner, value}, "")
+						b.regionReleaseTemporaryConvert(source)
+						return result, nil
+					}
 					return b.createRuntimeCall("stringFromBytes", []llvm.Value{value}, ""), nil
 				case types.Rune:
+					if b.Regions {
+						owner, err := regionOwner()
+						if err != nil {
+							return llvm.Value{}, err
+						}
+						result := b.createRuntimeCall("stringFromRunesRegions", []llvm.Value{owner, value}, "")
+						b.regionReleaseTemporaryConvert(source)
+						return result, nil
+					}
 					return b.createRuntimeCall("stringFromRunes", []llvm.Value{value}, ""), nil
 				default:
 					return llvm.Value{}, b.makeError(pos, "todo: convert to string: "+typeFrom.String())
@@ -3395,8 +3627,22 @@ func (b *builder) createConvert(typeFrom, typeTo types.Type, value llvm.Value, p
 		elemType := typeTo.Elem().Underlying().(*types.Basic) // must be byte or rune
 		switch elemType.Kind() {
 		case types.Byte:
+			if b.Regions {
+				owner, err := regionOwner()
+				if err != nil {
+					return llvm.Value{}, err
+				}
+				return b.createRuntimeCall("stringToBytesRegions", []llvm.Value{owner, value}, ""), nil
+			}
 			return b.createRuntimeCall("stringToBytes", []llvm.Value{value}, ""), nil
 		case types.Rune:
+			if b.Regions {
+				owner, err := regionOwner()
+				if err != nil {
+					return llvm.Value{}, err
+				}
+				return b.createRuntimeCall("stringToRunesRegions", []llvm.Value{owner, value}, ""), nil
+			}
 			return b.createRuntimeCall("stringToRunes", []llvm.Value{value}, ""), nil
 		default:
 			panic("unexpected type in string to slice conversion")

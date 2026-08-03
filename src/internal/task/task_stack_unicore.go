@@ -12,6 +12,11 @@ func Current() *Task {
 	return currentTask
 }
 
+// CurrentOrNil returns nil while running on the scheduler system stack.
+func CurrentOrNil() *Task {
+	return currentTask
+}
+
 // Pause suspends the current task and returns to the scheduler.
 // This function may only be called when running on a goroutine stack, not when running on the system stack or in an interrupt.
 func Pause() {

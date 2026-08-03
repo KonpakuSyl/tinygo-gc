@@ -21,6 +21,7 @@ type hashmap struct {
 	bucketBits uint8
 	keyEqual   func(x, y unsafe.Pointer, n uintptr) bool
 	keyHash    func(key unsafe.Pointer, size, seed uintptr) uint32
+	hashmapOwnerStorage
 }
 
 // A hashmap bucket. A bucket is a container of 8 key/value pairs: first the
@@ -72,7 +73,7 @@ func hashmapMake(keySize, valueSize uintptr, sizeHint uintptr, alg uint8) *hashm
 	keyHash := hashmapKeyHashAlg(tinygo.HashmapAlgorithm(alg))
 	keyEqual := hashmapKeyEqualAlg(tinygo.HashmapAlgorithm(alg))
 
-	return &hashmap{
+	m := &hashmap{
 		buckets:    buckets,
 		seed:       uintptr(fastrand()),
 		keySize:    keySize,
@@ -81,6 +82,39 @@ func hashmapMake(keySize, valueSize uintptr, sizeHint uintptr, alg uint8) *hashm
 		keyEqual:   keyEqual,
 		keyHash:    keyHash,
 	}
+	// Reflection reaches this constructor instead of hashmapMakeRegions. Bind
+	// its growth allocations to the owner that allocated the map itself.
+	hashmapSetOwner(m, nil)
+	return m
+}
+
+// hashmapMakeRegions is selected by the regions compiler mode. Keeping this
+// separate from hashmapMake preserves the established runtime ABI for every
+// other collector.
+func hashmapMakeRegions(owner unsafe.Pointer, keySize, valueSize uintptr, sizeHint uintptr, alg uint8) *hashmap {
+	bucketBits := uint8(0)
+	for hashmapHasSpaceToGrow(bucketBits) && hashmapOverLoadFactor(sizeHint, bucketBits) {
+		bucketBits++
+	}
+
+	bucketBufSize := unsafe.Sizeof(hashmapBucket{}) + keySize*8 + valueSize*8
+	buckets := hashmapAlloc(owner, bucketBufSize*(1<<bucketBits))
+
+	keyHash := hashmapKeyHashAlg(tinygo.HashmapAlgorithm(alg))
+	keyEqual := hashmapKeyEqualAlg(tinygo.HashmapAlgorithm(alg))
+
+	m := (*hashmap)(hashmapAlloc(owner, unsafe.Sizeof(hashmap{})))
+	*m = hashmap{
+		buckets:    buckets,
+		seed:       uintptr(fastrand()),
+		keySize:    keySize,
+		valueSize:  valueSize,
+		bucketBits: bucketBits,
+		keyEqual:   keyEqual,
+		keyHash:    keyHash,
+	}
+	hashmapSetOwner(m, owner)
+	return m
 }
 
 // Remove all entries from the map, without actually deallocating the space for
@@ -260,7 +294,7 @@ func hashmapSet(m *hashmap, key unsafe.Pointer, value unsafe.Pointer, hash uint3
 // value into the bucket, and returns a pointer to this bucket.
 func hashmapInsertIntoNewBucket(m *hashmap, key, value unsafe.Pointer, tophash uint8) *hashmapBucket {
 	bucketBufSize := hashmapBucketSize(m)
-	bucketBuf := alloc(bucketBufSize, nil)
+	bucketBuf := hashmapAllocFor(m, bucketBufSize)
 	bucket := (*hashmapBucket)(bucketBuf)
 
 	// Insert into the first slot, which is empty as it has just been allocated.
@@ -283,8 +317,11 @@ func hashmapGrow(m *hashmap) {
 func hashmapClone(intf _interface) _interface {
 	typ, val := decomposeInterface(intf)
 	m := (*hashmap)(val)
-	n := hashmapCopy(m, m.bucketBits)
-	return composeInterface(typ, unsafe.Pointer(&n))
+	owner := hashmapOwner(m)
+	n := (*hashmap)(hashmapAlloc(owner, unsafe.Sizeof(hashmap{})))
+	*n = hashmapCopy(m, m.bucketBits)
+	hashmapSetOwner(n, owner)
+	return composeInterface(typ, unsafe.Pointer(n))
 }
 
 func hashmapCopy(m *hashmap, sizeBits uint8) hashmap {
@@ -296,13 +333,13 @@ func hashmapCopy(m *hashmap, sizeBits uint8) hashmap {
 	n.bucketBits = sizeBits
 	numBuckets := uintptr(1) << n.bucketBits
 	bucketBufSize := hashmapBucketSize(m)
-	n.buckets = alloc(bucketBufSize*numBuckets, nil)
+	n.buckets = hashmapAllocFor(m, bucketBufSize*numBuckets)
 
 	// use a hashmap iterator to go through the old map
 	var it hashmapIterator
 
-	var key = alloc(m.keySize, nil)
-	var value = alloc(m.valueSize, nil)
+	var key = hashmapAllocFor(m, m.keySize)
+	var value = hashmapAllocFor(m, m.valueSize)
 
 	for hashmapNext(m, &it, key, value) {
 		h := n.keyHash(key, uintptr(n.keySize), n.seed)

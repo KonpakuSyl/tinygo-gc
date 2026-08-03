@@ -73,6 +73,71 @@ func TestManualGCConfigWindows(t *testing.T) {
 	}
 }
 
+func TestRegionsConfig(t *testing.T) {
+	for _, options := range []*compileopts.Options{
+		{Target: "linux-amd64-gnu", GC: "regions", Scheduler: "none"},
+		{Target: "linux-amd64-gnu", GC: "regions", Scheduler: "tasks"},
+		{Target: "linux-amd64-gnu", GC: "regions", Scheduler: "threads"},
+		{Target: "linux-amd64-gnu", GC: "regions", Scheduler: "none", BuildMode: "c-shared"},
+		{Target: "linux-amd64-gnu", GC: "regions", Scheduler: "threads", BuildMode: "c-shared"},
+		{GOOS: "darwin", GOARCH: "arm64", GC: "regions", Scheduler: "none"},
+		{GOOS: "darwin", GOARCH: "arm64", GC: "regions", Scheduler: "tasks"},
+		{GOOS: "darwin", GOARCH: "arm64", GC: "regions", Scheduler: "threads"},
+		{GOOS: "darwin", GOARCH: "arm64", GC: "regions", Scheduler: "none", BuildMode: "c-shared"},
+		{GOOS: "darwin", GOARCH: "arm64", GC: "regions", Scheduler: "threads", BuildMode: "c-shared"},
+		{GOOS: "windows", GOARCH: "amd64", GC: "regions", Scheduler: "none"},
+		{GOOS: "windows", GOARCH: "amd64", GC: "regions", Scheduler: "tasks"},
+		{GOOS: "windows", GOARCH: "amd64", GC: "regions", Scheduler: "threads"},
+		{GOOS: "windows", GOARCH: "amd64", GC: "regions", Scheduler: "none", BuildMode: "c-shared"},
+		{GOOS: "windows", GOARCH: "amd64", GC: "regions", Scheduler: "threads", BuildMode: "c-shared"},
+	} {
+		config, err := NewConfig(options)
+		if err != nil {
+			t.Fatalf("NewConfig(%+v) failed: %v", *options, err)
+		}
+		if !config.Regions() {
+			t.Fatalf("regions configuration has GC=%q", config.GC())
+		}
+		for _, path := range config.Target.ExtraFiles {
+			if options.Scheduler == "none" && strings.HasPrefix(filepath.Base(path), "task_stack_") {
+				t.Errorf("regions config still includes task stack file %q", path)
+			}
+		}
+	}
+
+	for _, scheduler := range []string{"cores", "asyncify"} {
+		_, err := NewConfig(&compileopts.Options{Target: "linux-amd64-gnu", GC: "regions", Scheduler: scheduler})
+		if err == nil || !strings.Contains(err.Error(), "supports only") {
+			t.Fatalf("regions scheduler validation error for %s = %v", scheduler, err)
+		}
+	}
+	_, err := NewConfig(&compileopts.Options{Target: "linux-amd64-gnu", GC: "regions", Scheduler: "tasks", BuildMode: "c-shared"})
+	if err == nil || !strings.Contains(err.Error(), "c-shared supports only") {
+		t.Fatalf("regions c-shared tasks validation error = %v", err)
+	}
+
+	for _, options := range []*compileopts.Options{
+		{Target: "wasm", GC: "regions", Scheduler: "none"},
+		{Target: "cortex-m-qemu", GC: "regions", Scheduler: "none"},
+	} {
+		_, err = NewConfig(options)
+		if err == nil || !strings.Contains(err.Error(), "hosted linux, darwin, and windows") {
+			t.Fatalf("regions target validation for %+v: %v", *options, err)
+		}
+	}
+	clearAndroidEnv(t)
+	t.Setenv("TINYGO_ANDROID_SYSROOT", fakeAndroidSysroot(t, t.TempDir(), "aarch64-linux-android", "21"))
+	_, err = NewConfig(&compileopts.Options{Target: "android-arm64", GC: "regions", Scheduler: "none"})
+	if err == nil || !strings.Contains(err.Error(), "hosted linux, darwin, and windows") {
+		t.Fatalf("regions Android target validation error = %v", err)
+	}
+
+	_, err = NewConfig(&compileopts.Options{Target: "linux-amd64-gnu", GC: "regions", Scheduler: "none", BuildMode: "wasi-legacy"})
+	if err == nil || !strings.Contains(err.Error(), "executable and c-shared") {
+		t.Fatalf("regions build mode validation error = %v", err)
+	}
+}
+
 func TestCommandLineExtraFiles(t *testing.T) {
 	dir := t.TempDir()
 	config, err := NewConfig(&compileopts.Options{

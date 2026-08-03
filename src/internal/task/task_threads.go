@@ -45,6 +45,11 @@ var mainTask Task
 var activeTasks = &mainTask
 var activeTaskLock PMutex
 
+// Host Tasks are only used while a c-shared exported call is active. Reusing
+// them avoids growing the task allocator for every call from a host thread.
+var hostTaskFree *Task
+var hostTaskLock PMutex
+
 func OnSystemStack() bool {
 	runtimePanic("todo: task.OnSystemStack")
 	return false
@@ -59,11 +64,16 @@ func Init(sp uintptr) {
 
 // Return the task struct for the current thread.
 func Current() *Task {
-	t := (*Task)(tinygo_task_current())
+	t := CurrentOrNil()
 	if t == nil {
 		runtimePanic("unknown current task")
 	}
 	return t
+}
+
+// CurrentOrNil returns nil for a host thread that has not entered TinyGo.
+func CurrentOrNil() *Task {
+	return (*Task)(tinygo_task_current())
 }
 
 // Pause pauses the current task, until it is resumed by another task.
@@ -100,7 +110,8 @@ var otherGoroutines uint32
 
 // Start a new OS thread.
 func start(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
-	t := &Task{}
+	t := (*Task)(runtime_taskAlloc(unsafe.Sizeof(Task{})))
+	*t = Task{}
 	t.state.id = atomic.AddUintptr(&goroutineID, 1)
 	if verbose {
 		println("*** start:  ", t.state.id, "from", Current().state.id)
@@ -119,6 +130,49 @@ func start(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
 	activeTasks = t
 	otherGoroutines++
 	activeTaskLock.Unlock()
+}
+
+// BindCurrent installs a lightweight Task for a host thread entering a
+// c-shared exported function. It is a no-op for a TinyGo-created thread.
+func BindCurrent() {
+	if t := CurrentOrNil(); t != nil {
+		if t.HostBound {
+			t.HostBoundDepth++
+		}
+		return
+	}
+	hostTaskLock.Lock()
+	t := hostTaskFree
+	if t != nil {
+		hostTaskFree = t.Next
+	}
+	hostTaskLock.Unlock()
+	if t == nil {
+		t = (*Task)(runtime_taskAlloc(unsafe.Sizeof(Task{})))
+	}
+	*t = Task{}
+	t.HostBound = true
+	t.HostBoundDepth = 1
+	tinygo_task_bind(t)
+}
+
+// UnbindCurrent detaches a host thread after an exported c-shared call.
+func UnbindCurrent() {
+	if t := CurrentOrNil(); t != nil && t.HostBound {
+		if t.HostBoundDepth > 1 {
+			t.HostBoundDepth--
+			return
+		}
+		if t.DeferFrame != nil || t.RegionDefers != nil {
+			runtimePanic("host task returned with active defer or region state")
+		}
+		tinygo_task_bind(nil)
+		*t = Task{}
+		hostTaskLock.Lock()
+		t.Next = hostTaskFree
+		hostTaskFree = t
+		hostTaskLock.Unlock()
+	}
 }
 
 //export tinygo_task_exited
@@ -311,6 +365,9 @@ func tinygo_task_send_gc_signal(threadID)
 
 //export tinygo_task_current
 func tinygo_task_current() unsafe.Pointer
+
+//go:linkname tinygo_task_bind tinygo_task_bind
+func tinygo_task_bind(t *Task)
 
 func NumCPU() int {
 	return int(numCPU)

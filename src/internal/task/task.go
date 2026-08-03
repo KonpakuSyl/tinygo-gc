@@ -33,6 +33,19 @@ type Task struct {
 	// DeferFrame stores a pointer to the (stack allocated) defer frame of the
 	// goroutine that is used for the recover builtin.
 	DeferFrame unsafe.Pointer
+
+	// RegionOwner is owned by runtime when gc=regions. It is deliberately an
+	// opaque pointer so internal/task does not depend on runtime.
+	RegionOwner unsafe.Pointer
+
+	// RegionDefers is the head of the gc=regions panic-unwind records for this
+	// task. Like RegionOwner, it stays opaque to avoid a runtime import cycle.
+	RegionDefers unsafe.Pointer
+
+	// HostBound identifies the lightweight Task installed for a c-shared host
+	// call. It must never be used to detach a TinyGo-created task.
+	HostBound      bool
+	HostBoundDepth uint32
 }
 
 const (
@@ -71,6 +84,9 @@ func getGoroutineStackSize(fn uintptr) uintptr
 
 //go:linkname runtime_alloc runtime.alloc
 func runtime_alloc(size uintptr, layout unsafe.Pointer) unsafe.Pointer
+
+//go:linkname runtime_taskAlloc runtime.taskAlloc
+func runtime_taskAlloc(size uintptr) unsafe.Pointer
 
 //go:linkname scheduleTask runtime.scheduleTask
 func scheduleTask(*Task)

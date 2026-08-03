@@ -268,12 +268,20 @@ func procPin() {
 func procUnpin() {
 }
 
-var heapSize uintptr = 128 * 1024 // small amount to start
+const initialHeapSize = 128 * 1024
+
+var heapSize uintptr
 var heapMaxSize uintptr
 
 var heapStart, heapEnd uintptr
 
 func allocateHeap() {
+	// allocateHeap runs before package init functions. Do not use a Go global
+	// initializer for this value: it would still be zero here and could later
+	// overwrite a heap that has already grown.
+	if heapSize == 0 {
+		heapSize = initialHeapSize
+	}
 	if manualSize := manualHeapSizeValue(); manualSize != 0 {
 		heapSize = manualSize
 		heapMaxSize = manualSize

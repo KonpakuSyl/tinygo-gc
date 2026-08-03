@@ -57,6 +57,7 @@ func (b *builder) createGo(instr *ssa.Go) {
 	var funcPtr llvm.Value
 	var funcType llvm.Type
 	hasContext := false
+	hasOwner := false
 	if callee := instr.Call.StaticCallee(); callee != nil {
 		// Static callee is known. This makes it easier to start a new
 		// goroutine.
@@ -77,6 +78,7 @@ func (b *builder) createGo(instr *ssa.Go) {
 			hasContext = true
 		}
 		funcType, funcPtr = b.getFunction(callee)
+		hasOwner = b.hasRegionOwnerABI(callee)
 	} else if instr.Call.IsInvoke() {
 		// This is a method call on an interface value.
 		itf := b.getValue(instr.Call.Value, getPos(instr))
@@ -86,6 +88,12 @@ func (b *builder) createGo(instr *ssa.Go) {
 		funcType = funcPtr.GlobalValueType()
 		params = append([]llvm.Value{itfValue}, params...) // start with receiver
 		params = append(params, itfTypeCode)               // end with typecode
+		// The interface invoke thunk uses its final context argument to carry
+		// the selected owner for concrete methods with the regions ABI.
+		if b.Regions {
+			params = append(params, b.regionOwner())
+			hasContext = true
+		}
 	} else {
 		// This is a function pointer.
 		// At the moment, two extra params are passed to the newly started
@@ -102,7 +110,7 @@ func (b *builder) createGo(instr *ssa.Go) {
 
 	paramBundle := b.emitPointerPack(params)
 	var stackSize llvm.Value
-	callee := b.createGoroutineStartWrapper(funcType, funcPtr, prefix, hasContext, false, instr.Pos())
+	callee := b.createGoroutineStartWrapper(funcType, funcPtr, prefix, hasContext, hasOwner, false, instr.Pos())
 	if b.AutomaticStackSize {
 		// The stack size is not known until after linking. Call a dummy
 		// function that will be replaced with a load from a special ELF
@@ -240,7 +248,7 @@ func (b *builder) createWasmExport() {
 		}
 
 		// Create a new goroutine and add it to the runqueue.
-		wrapper := b.createGoroutineStartWrapper(b.llvmFnType, b.llvmFn, "", false, true, pos)
+		wrapper := b.createGoroutineStartWrapper(b.llvmFnType, b.llvmFn, "", false, false, true, pos)
 		stackSize := llvm.ConstInt(b.uintptrType, b.DefaultStackSize, false)
 		taskStartFnType, taskStartFn := builder.getFunction(b.program.ImportedPackage("internal/task").Members["start"].(*ssa.Function))
 		builder.createCall(taskStartFnType, taskStartFn, []llvm.Value{wrapper, statePtr, stackSize, llvm.Undef(b.dataPtrType)}, "")
@@ -282,11 +290,11 @@ func (b *builder) createWasmExport() {
 // ignores the return value because newly started goroutines do not have a
 // return value.
 //
-// The hasContext parameter indicates whether the context parameter (the second
-// to last parameter of the function) is used for this wrapper. If hasContext is
-// false, the parameter bundle is assumed to have no context parameter and undef
-// is passed instead.
-func (c *compilerContext) createGoroutineStartWrapper(fnType llvm.Type, fn llvm.Value, prefix string, hasContext, isWasmExport bool, pos token.Pos) llvm.Value {
+// The hasContext parameter indicates whether the normal context parameter is
+// present in the parameter bundle. hasOwner marks the regions-only hidden
+// owner ABI. Goroutine entry builds a new function region rather than letting
+// automatic allocations fall through to the task root.
+func (c *compilerContext) createGoroutineStartWrapper(fnType llvm.Type, fn llvm.Value, prefix string, hasContext, hasOwner, isWasmExport bool, pos token.Pos) llvm.Value {
 	var wrapper llvm.Value
 
 	b := &builder{
@@ -353,14 +361,27 @@ func (c *compilerContext) createGoroutineStartWrapper(fnType llvm.Type, fn llvm.
 			if !hasContext {
 				paramTypes = paramTypes[:len(paramTypes)-1] // strip context parameter
 			}
+			if hasOwner {
+				paramTypes = paramTypes[:len(paramTypes)-1] // strip hidden owner
+			}
 
 			params := b.emitPointerUnpack(wrapper.Param(0), paramTypes)
+			var owner llvm.Value
+			if hasOwner {
+				regionType := c.getLLVMRuntimeType("region")
+				owner = b.CreateAlloca(regionType, "region")
+				b.createRuntimeCall("regionEnter", []llvm.Value{owner}, "")
+				params = append(params, owner)
+			}
 			if !hasContext {
 				params = append(params, llvm.Undef(c.dataPtrType)) // add dummy context parameter
 			}
 
 			// Create the call.
 			b.CreateCall(fnType, fn, params, "")
+			if !owner.IsNil() {
+				b.createRuntimeCall("regionExit", []llvm.Value{owner}, "")
+			}
 
 			if c.Scheduler == "asyncify" {
 				b.CreateCall(deadlockType, deadlock, []llvm.Value{

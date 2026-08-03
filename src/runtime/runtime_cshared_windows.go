@@ -2,18 +2,12 @@
 
 package runtime
 
-// cSharedInitialized is intentionally not synchronized. The initial native
-// c-shared mode supports a single host thread with scheduler=none.
-var cSharedInitialized bool
-
 // cSharedInit initializes the TinyGo runtime for calls through a native shared
 // library. It deliberately does not invoke main.main or process-wide startup.
 func cSharedInit(stackTopAtEntry uintptr) {
-	stackTop = stackTopAtEntry
-	if cSharedInitialized {
+	if !cSharedInitBegin(stackTopAtEntry) {
 		return
 	}
-	cSharedInitialized = true
 
 	// Reserve the fixed manual heap (and set heapStart/heapEnd) before the GC
 	// and package inits run.
@@ -26,7 +20,10 @@ func cSharedInit(stackTopAtEntry uintptr) {
 
 	initRand()
 	initHeap()
+	cSharedTaskInitEnter()
 	initAll()
+	cSharedTaskInitExit()
+	cSharedInitComplete()
 }
 
 //go:export tinygo_init

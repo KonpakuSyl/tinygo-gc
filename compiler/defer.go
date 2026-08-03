@@ -75,6 +75,18 @@ func (b *builder) deferInitFunc() {
 		b.deferFrame = b.CreateAlloca(deferFrameType, "deferframe.buf")
 		stackPointer := b.readStackPointer()
 		b.createRuntimeCall("setupDeferFrame", []llvm.Value{b.deferFrame, stackPointer}, "")
+		// A recover frame must always record its ambient owner. A borrowed
+		// caller region and a regions.Do callback can both have nested child
+		// regions to unwind even when this function has no owner alloca.
+		if b.Regions {
+			recordType := b.getLLVMRuntimeType("regionDeferRecord")
+			b.regionDeferRecord = b.CreateAlloca(recordType, "region.defer")
+			owner := b.regionAlloca
+			if owner.IsNil() {
+				owner = llvm.ConstPointerNull(b.dataPtrType)
+			}
+			b.createRuntimeCall("regionRegisterDefer", []llvm.Value{b.deferFrame, b.regionDeferRecord, owner}, "")
+		}
 
 		// Create the landing pad block, which is where control transfers after
 		// a panic.
@@ -500,8 +512,7 @@ func (b *builder) createDefer(instr *ssa.Defer) {
 		// This may be hit a variable number of times, so use a heap allocation.
 		size := b.targetData.TypeAllocSize(deferredCallType)
 		sizeValue := llvm.ConstInt(b.uintptrType, size, false)
-		nilPtr := llvm.ConstNull(b.dataPtrType)
-		alloca = b.createRuntimeCall("alloc", []llvm.Value{sizeValue, nilPtr}, "defer.alloc.call")
+		alloca = b.createManagedAlloc(sizeValue, llvm.ConstNull(b.dataPtrType), "defer.alloc.call")
 	}
 	if b.NeedsStackObjects {
 		b.trackPointer(alloca)
@@ -621,10 +632,14 @@ func (b *builder) createRunDefers() {
 				fnPtr = b.getInvokeFunction(callback)
 				fnType = fnPtr.GlobalValueType()
 
-				// Add the context parameter. An interface call cannot also be a
-				// closure but we have to supply the parameter anyway for platforms
-				// with a strict calling convention.
-				forwardParams = append(forwardParams, llvm.Undef(b.dataPtrType))
+				// The invoke thunk uses its context slot as a regions owner for a
+				// concrete user method. Non-regions builds retain the ordinary
+				// dummy context.
+				if b.Regions {
+					forwardParams = append(forwardParams, b.regionOwner())
+				} else {
+					forwardParams = append(forwardParams, llvm.Undef(b.dataPtrType))
+				}
 			}
 
 			b.createCall(fnType, fnPtr, forwardParams, "")
@@ -651,6 +666,9 @@ func (b *builder) createRunDefers() {
 			// Plain TinyGo functions add some extra parameters to implement async functionality and function receivers.
 			// These parameters should not be supplied when calling into an external C/ASM function.
 			if !b.getFunctionInfo(callback).exported {
+				if b.hasRegionOwnerABI(callback) {
+					forwardParams = append(forwardParams, b.regionOwner())
+				}
 				// Add the context parameter. We know it is ignored by the receiving
 				// function, but we have to pass one anyway.
 				forwardParams = append(forwardParams, llvm.Undef(b.dataPtrType))

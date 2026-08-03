@@ -19,6 +19,7 @@ func TestInterp(t *testing.T) {
 		"interface",
 		"revert",
 		"alloc",
+		"regions",
 	} {
 		name := name // make local to this closure
 		t.Run(name, func(t *testing.T) {

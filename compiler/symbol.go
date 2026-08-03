@@ -100,6 +100,12 @@ func (c *compilerContext) getFunction(fn *ssa.Function) (llvm.Type, llvm.Value) 
 	// Add an extra parameter as the function context. This context is used in
 	// closures and bound methods, but should be optimized away when not used.
 	if !info.exported {
+		if c.hasRegionOwnerABI(fn) {
+			// The owner is an internal ABI detail used only by regions builds.
+			// Keep it adjacent to the context so the public/exported ABI is
+			// unchanged.
+			paramInfos = append(paramInfos, paramInfo{llvmType: c.dataPtrType, name: "owner", elemSize: 0})
+		}
 		paramInfos = append(paramInfos, paramInfo{llvmType: c.dataPtrType, name: "context", elemSize: 0})
 	}
 

@@ -47,9 +47,16 @@ func (b *builder) createMakeMap(expr *ssa.MakeMap) (llvm.Value, error) {
 			return llvm.Value{}, err
 		}
 	}
-	hashmap := b.createRuntimeCall("hashmapMake", []llvm.Value{llvmKeySize, llvmValueSize, sizeHint, algEnum}, "")
+	var hashmap llvm.Value
+	if b.Regions {
+		owner := b.regionOwner()
+		hashmap = b.createRuntimeCall("hashmapMakeRegions", []llvm.Value{owner, llvmKeySize, llvmValueSize, sizeHint, algEnum}, "")
+	} else {
+		hashmap = b.createRuntimeCall("hashmapMake", []llvm.Value{llvmKeySize, llvmValueSize, sizeHint, algEnum}, "")
+	}
 	return hashmap, nil
 }
+
 
 // createMapLookup returns the value in a map. It calls a runtime function
 // depending on the map key type to load the map value and its comma-ok value.

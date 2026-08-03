@@ -99,6 +99,42 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 			return nil, fmt.Errorf("-gc=manual is currently supported only on darwin, hosted linux, android, windows, and wasm targets")
 		}
 	}
+	if config.GC() == "regions" {
+		switch config.Scheduler() {
+		case "none", "tasks", "threads":
+			// Supported hosted schedulers. Task-local region ownership keeps
+			// allocations isolated across both cooperative tasks and OS threads.
+		default:
+			return nil, fmt.Errorf("-gc=regions supports only -scheduler=none, tasks, or threads")
+		}
+		if config.BuildMode() != "default" && config.BuildMode() != "c-shared" {
+			return nil, fmt.Errorf("-gc=regions supports only executable and c-shared builds")
+		}
+		if !regionsGCSupported(config) {
+			return nil, fmt.Errorf("-gc=regions is currently supported only on hosted linux, darwin, and windows targets")
+		}
+		if config.Scheduler() == "none" {
+			// scheduler=none does not provide tinygo_task_exit. Some hosted target
+			// specifications include cooperative task-stack assembly by default.
+			config.Target.ExtraFiles = slices.DeleteFunc(config.Target.ExtraFiles, func(path string) bool {
+				base := filepath.Base(path)
+				return strings.HasPrefix(base, "task_stack_") && (strings.HasSuffix(base, ".S") || strings.HasSuffix(base, ".c"))
+			})
+		} else if config.Scheduler() == "tasks" {
+			if config.StackSize() == 0 {
+				// Hosted target specifications normally default to threads and do
+				// not carry a cooperative stack size. Keep the task scheduler
+				// usable without an unrelated command-line tuning flag.
+				config.Target.DefaultStackSize = 64 * 1024
+			}
+			config.Target.ExtraFiles = slices.DeleteFunc(config.Target.ExtraFiles, func(path string) bool {
+				return path == "src/internal/task/task_threads.c"
+			})
+			if taskStack := regionsTaskStackFile(config.GOARCH()); taskStack != "" && !slices.Contains(config.Target.ExtraFiles, taskStack) {
+				config.Target.ExtraFiles = append(config.Target.ExtraFiles, taskStack)
+			}
+		}
+	}
 	if config.BuildMode() == "c-shared" {
 		switch config.GOOS() {
 		case "darwin", "linux", "android", "windows":
@@ -106,21 +142,26 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 		default:
 			return nil, fmt.Errorf("native buildmode c-shared is currently supported only on darwin, linux, android, and windows")
 		}
-		if config.GC() != "manual" {
-			return nil, fmt.Errorf("native buildmode c-shared currently requires -gc=manual")
+		if config.GC() != "manual" && config.GC() != "regions" {
+			return nil, fmt.Errorf("native buildmode c-shared currently requires -gc=manual or -gc=regions")
 		}
-		if config.Scheduler() != "none" {
-			return nil, fmt.Errorf("native buildmode c-shared currently requires -scheduler=none")
+		if config.Scheduler() != "none" && config.Scheduler() != "threads" {
+			return nil, fmt.Errorf("native buildmode c-shared supports only -scheduler=none or threads")
 		}
 		// scheduler=none does not provide tinygo_task_exit, so drop the
 		// cooperative task-stack assembly that would otherwise be linked in
 		// through the default hosted target ExtraFiles list.
-		config.Target.ExtraFiles = slices.DeleteFunc(config.Target.ExtraFiles, func(path string) bool {
-			base := filepath.Base(path)
-			return strings.HasPrefix(base, "task_stack_") && (strings.HasSuffix(base, ".S") || strings.HasSuffix(base, ".c"))
-		})
+		if config.Scheduler() == "none" {
+			config.Target.ExtraFiles = slices.DeleteFunc(config.Target.ExtraFiles, func(path string) bool {
+				base := filepath.Base(path)
+				return strings.HasPrefix(base, "task_stack_") && (strings.HasSuffix(base, ".S") || strings.HasSuffix(base, ".c"))
+			})
+		}
 		switch config.GOOS() {
 		case "darwin":
+			if config.Scheduler() == "threads" {
+				break
+			}
 			// A shared library must not install the executable's process-wide
 			// scheduler or fatal-signal hooks. Keep the Darwin futex support: the
 			// allocator mutex uses it even with scheduler=none.
@@ -133,6 +174,9 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 				}
 			})
 		case "linux", "android":
+			if config.Scheduler() == "threads" {
+				break
+			}
 			// The Linux target normally includes its thread scheduler and signal
 			// support as C objects. They are not used with scheduler=none and leave
 			// process-wide hooks in a shared library. The futex implementation stays
@@ -169,6 +213,40 @@ func NewConfig(options *compileopts.Options) (*compileopts.Config, error) {
 	}
 
 	return config, nil
+}
+
+func regionsTaskStackFile(goarch string) string {
+	switch goarch {
+	case "386":
+		return "src/internal/task/task_stack_386.S"
+	case "amd64":
+		return "src/internal/task/task_stack_amd64.S"
+	case "arm64":
+		return "src/internal/task/task_stack_arm64.S"
+	default:
+		return ""
+	}
+}
+
+// regionsGCSupported identifies hosted native targets with the runtime heap
+// reservation and shared-library initialization paths required by gc.regions.
+func regionsGCSupported(config *compileopts.Config) bool {
+	switch config.GOOS() {
+	case "darwin", "windows":
+		return true
+	case "linux":
+		// Several bare-metal targets use linux as their GOOS to satisfy the Go
+		// standard library. They do not provide runtime_unix.go's hosted heap.
+		for _, tag := range config.Target.BuildTags {
+			switch tag {
+			case "baremetal", "nintendoswitch", "wasm_unknown", "wasip1", "wasip2":
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
 }
 
 func manualGCSupported(config *compileopts.Config) bool {

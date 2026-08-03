@@ -127,7 +127,8 @@ func (c *Config) BuildTags() []string {
 }
 
 // GC returns the garbage collection strategy in use on this platform. Valid
-// values are "none", "leaking", "conservative", "precise" and "manual".
+// values are "none", "leaking", "conservative", "precise", "manual" and
+// "regions".
 func (c *Config) GC() string {
 	if c.Options.GC != "" {
 		return c.Options.GC
@@ -136,6 +137,12 @@ func (c *Config) GC() string {
 		return c.Target.GC
 	}
 	return "conservative"
+}
+
+// Regions reports whether allocations are managed by compiler-inserted
+// lifetime regions instead of a garbage collector.
+func (c *Config) Regions() bool {
+	return c.GC() == "regions"
 }
 
 // ManualSize returns the fixed heap size for the manual collector.

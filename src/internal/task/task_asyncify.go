@@ -50,7 +50,8 @@ type stackState struct {
 // start creates and starts a new goroutine with the given function and arguments.
 // The new goroutine is immediately started.
 func start(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
-	t := &Task{}
+	t := (*Task)(runtime_taskAlloc(unsafe.Sizeof(Task{})))
+	*t = Task{}
 	t.state.initialize(fn, args, stackSize)
 	scheduleTask(t)
 }
@@ -68,7 +69,7 @@ func (s *state) initialize(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
 	s.args = args
 
 	// Create a stack.
-	stack := runtime_alloc(stackSize, nil)
+	stack := runtime_taskAlloc(stackSize)
 
 	// Set up the stack canary, a random number that should be checked when
 	// switching from the task back to the scheduler. The stack canary pointer
@@ -87,6 +88,11 @@ var currentTask *Task
 
 // Current returns the current active task.
 func Current() *Task {
+	return currentTask
+}
+
+// CurrentOrNil returns nil while running on the scheduler system stack.
+func CurrentOrNil() *Task {
 	return currentTask
 }
 

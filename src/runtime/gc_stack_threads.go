@@ -1,4 +1,4 @@
-//go:build scheduler.threads
+//go:build scheduler.threads && !gc.regions
 
 package runtime
 

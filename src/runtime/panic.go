@@ -66,6 +66,7 @@ func panicOrGoexit(message interface{}, panicking panicState) {
 		if frame != nil {
 			frame.PanicValue = message
 			frame.Panicking = panicking
+			regionPanicUnwind(unsafe.Pointer(frame))
 			tinygo_longjmp(frame)
 			// unreachable
 		}

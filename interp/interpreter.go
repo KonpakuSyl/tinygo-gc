@@ -238,6 +238,13 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 				// which case this call won't even get to this point but will
 				// already be emitted in initAll.
 				continue
+			case callFn.name == "runtime.regionEnter" || callFn.name == "runtime.regionEnterWithParent" || callFn.name == "runtime.regionExit":
+				// Region ownership is a runtime-only concern. The interpreter turns
+				// allocations made during package initialization into LLVM globals,
+				// so there is no chunk chain to enter or recycle at compile time.
+				// Keeping these calls as no-ops lets init folding retain the same
+				// static lifetime as ordinary runtime.alloc initializers.
+				continue
 			case strings.HasPrefix(callFn.name, "runtime.print") || callFn.name == "runtime._panic" || callFn.name == "runtime.hashmapGet" || callFn.name == "runtime.hashmapInterfaceHash" ||
 				callFn.name == "os.runtime_args" || callFn.name == "internal/task.start" || callFn.name == "internal/task.Current" ||
 				callFn.name == "time.startTimer" || callFn.name == "time.stopTimer" || callFn.name == "time.resetTimer":
@@ -277,15 +284,22 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 				// means that monotonic time in the time package is counted from
 				// time.Time{}.Sub(1), which should be fine.
 				locals[inst.localIndex] = literalValue{uint64(0)}
-			case callFn.name == "runtime.alloc":
+			case callFn.name == "runtime.alloc" || callFn.name == "runtime.regionAlloc":
 				// Allocate heap memory. At compile time, this is instead done
 				// by creating a global variable.
 
 				// Get the requested memory size to be allocated.
-				size := operands[1].Uint(r)
+				argOffset := 1
+				if callFn.name == "runtime.regionAlloc" {
+					// regionAlloc(owner, size, layout) has an explicit owner
+					// before the runtime.alloc-compatible arguments. The owner
+					// is intentionally ignored while folding static init code.
+					argOffset++
+				}
+				size := operands[argOffset].Uint(r)
 
 				// Get the object layout, if it is available.
-				llvmLayoutType := r.getLLVMTypeFromLayout(operands[2])
+				llvmLayoutType := r.getLLVMTypeFromLayout(operands[argOffset+1])
 
 				// Get the alignment of the memory to be allocated.
 				alignment := 0 // use default alignment if unset
@@ -309,7 +323,7 @@ func (r *runner) run(fn *function, params []value, parentMem *memoryView, indent
 				// that stores to it copy it, etc).
 				ptr := newPointerValue(r, index, 0)
 				if r.debug {
-					fmt.Fprintln(os.Stderr, indent+"runtime.alloc:", size, "->", ptr)
+					fmt.Fprintln(os.Stderr, indent+callFn.name+":", size, "->", ptr)
 				}
 				locals[inst.localIndex] = ptr
 			case strings.HasPrefix(callFn.name, "llvm.umin."):

@@ -19,6 +19,11 @@ func Current() *Task {
 	return &mainTask
 }
 
+// CurrentOrNil returns the active task without imposing scheduler semantics.
+func CurrentOrNil() *Task {
+	return &mainTask
+}
+
 //go:noinline
 func start(fn uintptr, args unsafe.Pointer, stackSize uintptr) {
 	// The compiler will error if this is reachable.

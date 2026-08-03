@@ -93,12 +93,19 @@ func putchar(c byte) {
 	libc_putchar(int(c))
 }
 
-var heapSize uintptr = 128 * 1024 // small amount to start
+const initialHeapSize = 128 * 1024
+
+var heapSize uintptr
 var heapMaxSize uintptr
 
 var heapStart, heapEnd uintptr
 
 func preinit() {
+	// preinit runs before package init functions. Set this explicitly instead
+	// of relying on a Go global initializer, which has not run at this point.
+	if heapSize == 0 {
+		heapSize = initialHeapSize
+	}
 	// Allocate a large chunk of virtual memory. Because it is virtual, it won't
 	// really be allocated in RAM. Memory will only be allocated when it is
 	// first touched.

@@ -530,9 +530,7 @@ func (p *lowerInterfacesPass) defineInterfaceMethodFunc(fn llvm.Value, itf *inte
 	for i := range params {
 		params[i] = fn.Param(i + 1)
 	}
-	params = append(params,
-		llvm.Undef(p.ptrType),
-	)
+	methodContext := llvm.Undef(p.ptrType)
 
 	// Start chain in the entry block.
 	entry := p.ctx.AddBasicBlock(fn, "entry")
@@ -572,12 +570,22 @@ func (p *lowerInterfacesPass) defineInterfaceMethodFunc(fn llvm.Value, itf *inte
 		p.builder.SetInsertPointAtEnd(bb)
 		receiver := fn.FirstParam()
 
+		callParams := params
+		// A user method compiled with gc=regions has one extra owner argument
+		// immediately before its normal context. The invoke thunk receives that
+		// owner in its own final context slot; standard methods retain only the
+		// normal dummy context.
+		if p.config.GC() == "regions" && int(function.ParamsCount()) == len(params)+3 {
+			callParams = append(append([]llvm.Value{}, params...), context)
+		}
+		callParams = append(callParams, methodContext)
+
 		paramTypes := []llvm.Type{receiver.Type()}
-		for _, param := range params {
+		for _, param := range callParams {
 			paramTypes = append(paramTypes, param.Type())
 		}
 		functionType := llvm.FunctionType(returnType, paramTypes, false)
-		retval := p.builder.CreateCall(functionType, function, append([]llvm.Value{receiver}, params...), "")
+		retval := p.builder.CreateCall(functionType, function, append([]llvm.Value{receiver}, callParams...), "")
 		if retval.Type().TypeKind() == llvm.VoidTypeKind {
 			p.builder.CreateRetVoid()
 		} else {

@@ -129,10 +129,7 @@ func (b *builder) emitPointerPack(values []llvm.Value) llvm.Value {
 		// Packed data is bigger than a pointer, so allocate it on the heap.
 		sizeValue := llvm.ConstInt(b.uintptrType, size, false)
 		align := b.targetData.ABITypeAlignment(packedType)
-		packedAlloc := b.createRuntimeCall("alloc", []llvm.Value{
-			sizeValue,
-			llvm.ConstNull(b.dataPtrType),
-		}, "")
+		packedAlloc := b.createManagedAlloc(sizeValue, llvm.ConstNull(b.dataPtrType), "")
 		packedAlloc.AddCallSiteAttribute(0, b.ctx.CreateEnumAttribute(llvm.AttributeKindID("align"), uint64(align)))
 		if b.NeedsStackObjects {
 			b.trackPointer(packedAlloc)
